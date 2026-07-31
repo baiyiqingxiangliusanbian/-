@@ -1,0 +1,243 @@
+{
+	"enemies": [
+		{
+			"id": "mountain_imp",
+			"name": "山魈",
+			"tier": "normal",
+			"hp": 28,
+			"story": "山中精怪，受灵气滋养而生，喜袭人夺食。",
+			"abilities": ["enrage_half:2"],
+			"ability_desc": "狂性：气血低于一半时力量+2",
+			"intents": [
+				{"action": "attack", "value": 6, "weight": 3},
+				{"action": "attack", "value": 4, "status": "weak", "stacks": 1, "weight": 1},
+				{"action": "defend", "value": 4, "weight": 1}
+			],
+			"art": "Art/enemies/mountain_imp.png"
+		},
+		{
+			"id": "wolf_demon",
+			"name": "野狼精",
+			"tier": "normal",
+			"hp": 32,
+			"story": "吞食过修士血肉的野狼，已开灵智。",
+			"abilities": ["first_strike", "summon:wolf_cub:3"],
+			"ability_desc": "迅捷：战斗开始时抢先行动一次。狼嚎：每3回合召唤一只野狼幼崽。",
+			"intents": [
+				{"action": "attack", "value": 7, "weight": 3},
+				{"action": "attack_multi", "value": 3, "times": 2, "weight": 2},
+				{"action": "defend", "value": 5, "weight": 1}
+			],
+			"art": "Art/enemies/wolf_demon.png"
+		},
+		{
+			"id": "wolf_cub",
+			"name": "野狼幼崽",
+			"tier": "normal",
+			"hp": 15,
+			"story": "被狼妖召唤来的幼崽，虽弱小但数量多了也麻烦。",
+			"abilities": [],
+			"ability_desc": "",
+			"intents": [
+				{"action": "attack", "value": 4, "weight": 4}
+			],
+			"art": "Art/enemies/wolf_demon.png"
+		},
+		{
+			"id": "rogue_cultivator",
+			"name": "魔修",
+			"tier": "normal",
+			"hp": 36,
+			"story": "堕入魔道的散修，以杀人夺宝为生。",
+			"abilities": ["drain:1"],
+			"ability_desc": "魔功：每次攻击汲取1点气血",
+			"intents": [
+				{"action": "attack", "value": 8, "weight": 3},
+				{"action": "buff", "status": "strength", "stacks": 2, "weight": 1},
+				{"action": "attack", "value": 5, "status": "poison", "stacks": 2, "weight": 1}
+			],
+			"art": "Art/enemies/rogue_cultivator.png"
+		},
+		{
+			"id": "corpse_puppet",
+			"name": "尸傀",
+			"tier": "normal",
+			"hp": 38,
+			"story": "炼尸宗遗落的傀儡，不知疼痛，不惧生死。",
+			"abilities": ["thorns:1"],
+			"ability_desc": "尸毒：受到攻击时反噬1点伤害",
+			"intents": [
+				{"action": "attack", "value": 9, "weight": 2},
+				{"action": "defend", "value": 8, "weight": 2},
+				{"action": "attack", "value": 6, "status": "poison", "stacks": 2, "weight": 1}
+			],
+			"art": "Art/enemies/corpse_puppet.png"
+		},
+		{
+			"id": "talisman_cultist",
+			"name": "符修",
+			"tier": "normal",
+			"hp": 30,
+			"story": "神霄派弃徒，一把灵符神出鬼没，最擅削弱敌手。",
+			"abilities": ["start_weak:1", "start_vulnerable:1"],
+			"ability_desc": "符镇：战斗开始时你获得1层虚弱与1层易伤",
+			"intents": [
+				{"action": "attack", "value": 5, "status": "weak", "stacks": 2, "weight": 3},
+				{"action": "attack", "value": 7, "weight": 2},
+				{"action": "debuff", "status": "vulnerable", "stacks": 2, "weight": 1}
+			],
+			"art": "Art/enemies/talisman_cultist.png"
+		},
+		{
+			"id": "haunting_wraith",
+			"name": "怨灵缠身",
+			"tier": "normal",
+			"hp": 35,
+			"story": "枉死者的怨念凝聚而成，无形无质，能侵蚀修士神魂。",
+			"abilities": ["curse_ritual:1"],
+			"ability_desc": "怨念缠身：每回合将一张「怨念」诅咒牌洗入你的牌库",
+			"intents": [
+				{"action": "attack", "value": 7, "weight": 3},
+				{"action": "attack", "value": 5, "status": "weak", "stacks": 1, "weight": 2}
+			],
+			"art": "Art/enemies/mountain_imp.png"
+		},
+		{
+			"id": "miser",
+			"name": "守财奴",
+			"tier": "normal",
+			"hp": 35,
+			"story": "积财如山的吝啬散修，身上藏满了灵石。",
+			"abilities": ["gold_drop:3"],
+			"ability_desc": "吝啬：受到攻击时掉落3枚灵石在身边。击败后可拾取。",
+			"intents": [
+				{"action": "defend", "value": 8, "weight": 3},
+				{"action": "attack", "value": 5, "weight": 2},
+				{"action": "defend", "value": 5, "weight": 1}
+			],
+			"art": "Art/enemies/rogue_cultivator.png"
+		},
+
+		{
+			"id": "apothecary",
+			"name": "药童",
+			"tier": "normal",
+			"hp": 22,
+			"story": "炼丹宗门的药童，虽然战斗力不强，但会照料灵兽。",
+			"abilities": ["heal_ally:5", "buff_ally:2"],
+			"ability_desc": "灵药：每回合治疗灵兽5点或给灵兽+2力量",
+			"intents": [
+				{"action": "heal_ally", "value": 5, "weight": 3},
+				{"action": "buff", "status": "strength", "stacks": 2, "weight": 1}
+			],
+			"art": "Art/enemies/talisman_cultist.png"
+		},
+		{
+			"id": "spirit_beast",
+			"name": "灵兽",
+			"tier": "normal",
+			"hp": 45,
+			"story": "药童饲养的灵兽，凶悍且忠诚。",
+			"abilities": [],
+			"ability_desc": "",
+			"intents": [
+				{"action": "attack", "value": 8, "weight": 3},
+				{"action": "attack_multi", "value": 4, "times": 2, "weight": 2},
+				{"action": "defend", "value": 6, "weight": 1}
+			],
+			"art": "Art/enemies/wolf_demon.png"
+		},
+
+		{
+			"id": "snake_demon",
+			"name": "蛇妖",
+			"tier": "elite",
+			"hp": 50,
+			"story": "修行三百年的竹叶青，毒可蚀骨。",
+			"abilities": ["poison_aura:1"],
+			"ability_desc": "毒雾：每回合开始时你获得1层中毒",
+			"intents": [
+				{"action": "attack", "value": 10, "status": "poison", "stacks": 2, "weight": 3},
+				{"action": "attack", "value": 12, "weight": 2},
+				{"action": "defend", "value": 8, "weight": 1}
+			],
+			"art": "Art/enemies/snake_demon.png"
+		},
+		{
+			"id": "bandit_lord",
+			"name": "黑风寨主",
+			"tier": "elite",
+			"hp": 60,
+			"story": "原是镖局总镖头，后占山为王，一把鬼头刀杀人无数。",
+			"abilities": ["enrage_half:3"],
+			"ability_desc": "血战：气血低于一半时力量+3",
+			"intents": [
+				{"action": "attack", "value": 11, "weight": 3},
+				{"action": "attack_multi", "value": 6, "times": 2, "weight": 2},
+				{"action": "buff", "status": "strength", "stacks": 2, "weight": 1}
+			],
+			"art": "Art/enemies/bandit_lord.png"
+		},
+		{
+			"id": "sword_traitor",
+			"name": "剑宗叛徒",
+			"tier": "elite",
+			"hp": 55,
+			"story": "剑宗叛逃的长老，精通剑术，清楚剑修的一切弱点。",
+			"abilities": ["hand_limit:2"],
+			"ability_desc": "知彼：你的手牌上限减少2",
+			"intents": [
+				{"action": "attack", "value": 9, "weight": 3},
+				{"action": "defend", "value": 10, "weight": 2},
+				{"action": "attack_multi", "value": 5, "times": 2, "weight": 2}
+			],
+			"art": "Art/enemies/sword_elder.png"
+		},
+		{
+			"id": "sword_elder",
+			"name": "剑宗长老",
+			"tier": "elite",
+			"hp": 60,
+			"story": "剑宗执法长老，剑心通明。他看出你身负魔性，执意清理门户。",
+			"abilities": ["block_aura:4"],
+			"ability_desc": "剑心通明：每回合开始时获得4点罡气",
+			"intents": [
+				{"action": "defend", "value": 10, "weight": 2},
+				{"action": "attack", "value": 13, "weight": 3},
+				{"action": "attack_multi", "value": 5, "times": 3, "weight": 2},
+				{"action": "buff", "status": "strength", "stacks": 2, "weight": 1}
+			],
+			"art": "Art/enemies/sword_elder.png"
+		},
+		{
+			"id": "nightmare_butterfly",
+			"name": "魇梦蝶",
+			"tier": "elite",
+			"hp": 45,
+			"story": "自深渊裂隙中飞出的异界之蝶，鳞粉可让人陷入无尽噩梦。",
+			"abilities": ["nightmare:1"],
+			"ability_desc": "梦魇：每回合对你施加1层梦魇。若你攻击它，再获得1层。达到3层时跳过你下一回合。",
+			"intents": [
+				{"action": "debuff", "status": "nightmare", "stacks": 1, "weight": 4}
+			],
+			"art": "Art/enemies/enchantress.png"
+		},
+
+		{
+			"id": "blood_ancestor",
+			"name": "血袍老祖",
+			"tier": "boss",
+			"hp": 90,
+			"story": "血洗青石镇的魔道巨擘，筑基期修为。你一介炼气散修，唯有死战。",
+			"abilities": ["regen:3", "enrage_half:2"],
+			"ability_desc": "血海：每回合恢复3点气血；半血时狂性大发力量+2",
+			"intents": [
+				{"action": "attack", "value": 12, "weight": 3},
+				{"action": "attack_multi", "value": 7, "times": 2, "weight": 2},
+				{"action": "buff", "status": "strength", "stacks": 3, "weight": 1},
+				{"action": "attack", "value": 9, "status": "poison", "stacks": 3, "weight": 1}
+			],
+			"art": "Art/enemies/blood_ancestor.png"
+		}
+	]
+}

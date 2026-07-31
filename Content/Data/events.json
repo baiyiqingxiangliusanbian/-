@@ -1,0 +1,159 @@
+{
+	"events": [
+		{
+			"id": "ancient_cave",
+			"title": "古修士洞府",
+			"text": "你发现一处布满禁制的洞府，主人早已坐化多年。禁制松动，似乎可以强行破开。",
+			"choices": [
+				{
+					"text": "强行破禁（失去8点气血，获得随机法宝）",
+					"effects": [
+						{"action": "hp", "value": -8},
+						{"action": "add_relic", "param": "random"}
+					],
+					"result": "禁制反噬震伤了你，但你在洞府深处找到了一件遗宝。"
+				},
+				{
+					"text": "悄然离开",
+					"effects": [],
+					"result": "你压下贪念，转身离去。机缘虽好，性命更重。"
+				}
+			]
+		},
+		{
+			"id": "wounded_cultivator",
+			"title": "受伤的修士",
+			"text": "一名散修倒在路边，气息奄奄。他腰间鼓鼓囊囊，似乎带了不少灵石。",
+			"choices": [
+				{
+					"text": "出手相救（失去5点气血救治，获得20灵石酬谢）",
+					"effects": [
+						{"action": "hp", "value": -5},
+						{"action": "gold", "value": 20}
+					],
+					"result": "修士服下你的精血稳住伤势，千恩万谢地留下灵石离去。"
+				},
+				{
+					"text": "杀人夺宝（获得35灵石，但魔道因果+1）",
+					"effects": [
+						{"action": "gold", "value": 35},
+						{"action": "kill_streak", "value": 1}
+					],
+					"result": "你一剑结果了他。灵石到手，但你感觉暗中似有道目光盯上了你。"
+				},
+				{
+					"text": "视而不见",
+					"effects": [],
+					"result": "修仙界弱肉强食，你没有多管闲事。"
+				}
+			]
+		},
+		{
+			"id": "spirit_spring",
+			"title": "灵气泉眼",
+			"text": "一汪灵泉汩汩流淌，泉眼处灵气浓郁得化为薄雾。",
+			"choices": [
+				{
+					"text": "沐浴灵泉（恢复15点气血）",
+					"effects": [{"action": "hp", "value": 15}],
+					"result": "灵泉洗去一身疲惫，伤势尽愈。"
+				},
+				{
+					"text": "泉边悟道（随机升级一张牌）",
+					"effects": [{"action": "upgrade_random"}],
+					"result": "你在泉边静坐三日，对功法有了新的领悟。"
+				}
+			]
+		},
+		{
+			"id": "mysterious_merchant",
+			"title": "神秘商人",
+			"text": "一名蒙面商人拦住去路，袖口绣着多宝阁的暗纹：「道友，新到的丹药，便宜。」",
+			"choices": [
+				{
+					"text": "买下（花20灵石，获得2颗随机丹药）",
+					"effects": [
+						{"action": "gold", "value": -20},
+						{"action": "add_pill", "param": "random"},
+						{"action": "add_pill", "param": "random"}
+					],
+					"result": "商人收下灵石，塞给你两个小玉瓶，转眼消失不见。"
+				},
+				{
+					"text": "拒绝",
+					"effects": [],
+					"result": "来路不明的丹药，你不敢乱吃。"
+				}
+			]
+		},
+		{
+			"id": "heart_demon_realm",
+			"title": "心魔幻境",
+			"text": "你误入一片幻境，心中最深处的恐惧与执念化作魔影，向你扑来。",
+			"choices": [
+				{
+					"text": "直面心魔（失去10点气血，获得一张稀有牌）",
+					"effects": [
+						{"action": "hp", "value": -10},
+						{"action": "add_card", "param": "random_rare"}
+					],
+					"result": "你斩碎魔影，心境通明，一道全新的感悟流入识海。"
+				},
+				{
+					"text": "强行破境而出",
+					"effects": [],
+					"result": "你咬破舌尖，强行清醒过来，心有余悸。"
+				}
+			]
+		},
+		{
+			"id": "market_luck",
+			"title": "坊市捡漏",
+			"text": "坊市地摊上，一块不起眼的石头让你心头一动——是灵石原矿！",
+			"choices": [
+				{
+					"text": "不动声色买下（获得15灵石）",
+					"effects": [{"action": "gold", "value": 15}],
+					"result": "你压下激动按废价买下，切开后果然是块好矿。"
+				}
+			]
+		},
+		{
+			"id": "ancient_scroll",
+			"title": "古籍残页",
+			"text": "破庙神龛下压着半页泛黄的古籍，记载着晦涩的修炼心得。",
+			"choices": [
+				{
+					"text": "潜心研读（随机升级一张牌）",
+					"effects": [{"action": "upgrade_random"}],
+					"result": "残页虽残缺，只言片语却让你茅塞顿开。"
+				},
+				{
+					"text": "卖给识货的（获得12灵石）",
+					"effects": [{"action": "gold", "value": 12}],
+					"result": "古籍终究是要换资源的，你把它卖给了多宝阁。"
+				}
+			]
+		},
+		{
+			"id": "hehuan_invitation",
+			"title": "合欢宗邀约",
+			"text": "一名合欢宗弟子笑吟吟地拦住你：「道友骨骼清奇，可愿来我宗客座几日？我宗的双修……咳，论道大会很是出名。」",
+			"choices": [
+				{
+					"text": "婉言谢绝",
+					"effects": [],
+					"result": "你拱手告辞。对方也不纠缠，笑着目送你离开。"
+				},
+				{
+					"text": "前去论道（失去8点气血，获得随机法宝）",
+					"effects": [
+						{"action": "hp", "value": -8},
+						{"action": "add_relic", "param": "random"}
+					],
+					"result": "三日论道让你元气大伤，但合欢宗的谢礼倒也丰厚。"
+				}
+			]
+		}
+	]
+}

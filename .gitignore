@@ -1,0 +1,33 @@
+# Unreal Engine generated directories
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# Generated IDE and project files
+.vs/
+.idea/
+.vscode/
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+*.xcodeproj/
+*.xcworkspace/
+*.xcuserstate
+*.xcuserdata/
+
+# Local build/package outputs
+*.apk
+*.aab
+*.ipa
+*.dSYM/
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*~

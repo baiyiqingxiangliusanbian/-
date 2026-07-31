@@ -1,0 +1,129 @@
+{
+	"acts": [
+		{
+			"act_id": "prologue",
+			"title": "第一章：青石镇血夜",
+			"start_beat": "village_night_01",
+			"beats": [
+				{
+					"id": "village_night_01",
+					"narrator_text": "月黑风高，青石镇外传来一声凄厉的惨叫。\n你从入定中惊醒，佩剑在鞘中嗡嗡作响——妖气。",
+					"choices": [
+						{
+							"text": "提剑出门，循声探查",
+							"outcome": {
+								"summary": "你飞身掠出屋外，山风混着血腥扑面而来。残月之下，一道黑影正拖着什么往山中隐去。你追至山崖边，脚下碎石松动——",
+								"type": "next_beat",
+								"param": "village_cliff_01",
+								"hp": 0,
+								"gold": 0
+							}
+						},
+						{
+							"text": "紧闭房门，以静制动",
+							"outcome": {
+								"summary": "你屏息凝神，在门后布下三道剑气禁制。然而片刻后，屋外传来沉重的喘息——那东西循着人味来了。",
+								"type": "next_beat",
+								"param": "village_hide_01",
+								"hp": 0,
+								"gold": 0
+							}
+						}
+					]
+				},
+				{
+					"id": "village_cliff_01",
+					"narrator_text": "脚下山石崩裂！你猝不及防跌入一道裂隙之中，所幸被崖壁上的枯藤拦住。\n你抬头望去，裂隙深处似乎有微弱的光芒。",
+					"choices": [
+						{
+							"text": "顺着光芒探去",
+							"outcome": {
+								"summary": "你攀着藤蔓向下摸索，在一处天然石室中发现了一具白骨。\n骨旁散落着一卷残破的剑谱和几块灵石——这是前辈遗物。",
+								"type": "next_beat",
+								"param": "village_cave_01",
+								"hp": -5,
+								"gold": 0,
+								"relic": "broken_sword_talisman"
+							}
+						}
+					]
+				},
+				{
+					"id": "village_hide_01",
+					"narrator_text": "「砰——！」房门被巨力撞开，一头浑身黑毛的狼妖低吼着扑了进来！",
+					"choices": [
+						{
+							"text": "迎战！",
+							"outcome": {
+								"summary": "你拔剑迎向狼妖，今晚不是你死，就是妖亡。",
+								"type": "combat",
+								"param": "wolf_warrior",
+								"hp": 0,
+								"gold": 0
+							}
+						}
+					]
+				},
+				{
+					"id": "village_cave_01",
+					"narrator_text": "你收起前辈遗物，沿着裂隙另一端爬出，发现自己已绕到镇外山林中。\n前方传来打斗声——是刚才那道黑影，正在与一头巨型狼妖搏斗。原来那"惨叫"之人并非遇害，而是猎妖师。",
+					"choices": [
+						{
+							"text": "上前助阵，合力诛妖",
+							"outcome": {
+								"summary": "你从侧翼杀出，与猎妖师前后夹击。狼妖腹背受敌，咆哮震天。",
+								"type": "combat",
+								"param": "wolf_warrior",
+								"hp": 0,
+								"gold": 0
+							}
+						},
+						{
+							"text": "暗中观战，伺机渔利",
+							"outcome": {
+								"summary": "你隐在暗处，等双方两败俱伤时再出手。",
+								"type": "elite",
+								"param": "wolf_warrior",
+								"hp": 0,
+								"gold": 0
+							}
+						}
+					]
+				}
+			]
+		},
+		{
+			"act_id": "prologue_victory",
+			"title": "第一章：战后余波",
+			"start_beat": "after_wolf_01",
+			"beats": [
+				{
+					"id": "after_wolf_01",
+					"narrator_text": "狼妖伏诛，山林重归寂静。猎妖师抱拳道谢：「在下青云宗外门弟子张远山，多谢道友相助。看道友修为不俗，可愿随我往青云宗一行？宗主正在广纳贤才。」",
+					"choices": [
+						{
+							"text": "欣然应允",
+							"outcome": {
+								"summary": "你跟随张远山踏上前往青云宗的山路。新的征程，由此开始。",
+								"type": "rest",
+								"param": "",
+								"hp": 10,
+								"gold": 0
+							}
+						},
+						{
+							"text": "婉拒好意，独自修行",
+							"outcome": {
+								"summary": "你婉拒了张远山的邀请，决定继续独自历练。修仙之路，终究要靠自己走。",
+								"type": "shop",
+								"param": "",
+								"hp": 0,
+								"gold": 0
+							}
+						}
+					]
+				}
+			]
+		}
+	]
+}

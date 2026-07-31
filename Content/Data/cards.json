@@ -1,0 +1,1766 @@
+{
+  "starter_deck": [
+    "strike",
+    "strike",
+    "strike",
+    "defend",
+    "defend",
+    "qi_breath",
+    "sword_step",
+    "sword_step",
+    "jian_yi_ning_shen"
+  ],
+  "cards": [
+    {
+      "id": "strike",
+      "name": "基础剑诀",
+      "type": "basic",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 1,
+      "description": "造成5点伤害",
+      "flavor": "剑者，心之刃。",
+      "effects": [
+        {
+          "action": "damage",
+          "value": 5,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "造成8点伤害",
+        "effects": [
+          {
+            "action": "damage",
+            "value": 8,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/strike.png"
+    },
+    {
+      "id": "defend",
+      "name": "剑气护体",
+      "type": "basic",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 1,
+      "description": "获得6点护体罡气",
+      "flavor": "剑气纵横，自成屏障。",
+      "effects": [
+        {
+          "action": "block",
+          "value": 6,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "获得8点护体罡气",
+        "effects": [
+          {
+            "action": "block",
+            "value": 8,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/defend.png"
+    },
+    {
+      "id": "jian_yi_ning_shen",
+      "name": "剑意凝神",
+      "type": "basic",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 1,
+      "description": "获得1层力量，造成2点伤害",
+      "flavor": "意凝于剑，气随心发。",
+      "effects": [
+        {
+          "action": "apply_status",
+          "stacks": 1,
+          "target": "self",
+          "status": "strength"
+        },
+        {
+          "action": "damage",
+          "value": 2,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "获得1层力量，造成4点伤害",
+        "effects": [
+          {
+            "action": "apply_status",
+            "stacks": 1,
+            "target": "self",
+            "status": "strength"
+          },
+          {
+            "action": "damage",
+            "value": 4,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/strike.png"
+    },
+    {
+      "id": "qi_breath",
+      "name": "引气入体",
+      "type": "skill",
+      "rarity": "common",
+      "cost": 0,
+      "description": "获得1点灵力",
+      "flavor": "吐故纳新，天地为炉。",
+      "effects": [
+        {
+          "action": "gain_spirit",
+          "value": 1,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "获得1点灵力，抽1张牌",
+        "effects": [
+          {
+            "action": "gain_spirit",
+            "value": 1,
+            "target": "self"
+          },
+          {
+            "action": "draw",
+            "value": 1,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/qi_breath.png"
+    },
+    {
+      "id": "sword_step",
+      "name": "剑影迷踪",
+      "type": "basic",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 1,
+      "description": "造成4点伤害，抽1张牌",
+      "flavor": "身剑合一，影随意动。",
+      "effects": [
+        {
+          "action": "damage",
+          "value": 4,
+          "target": "enemy"
+        },
+        {
+          "action": "draw",
+          "value": 1,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "造成5点伤害，抽1张牌",
+        "effects": [
+          {
+            "action": "damage",
+            "value": 5,
+            "target": "enemy"
+          },
+          {
+            "action": "draw",
+            "value": 1,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/sword_step.png"
+    },
+    {
+      "id": "sword_dance",
+      "name": "回风拂柳剑",
+      "type": "basic",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 1,
+      "description": "造成2点伤害3次",
+      "flavor": "回风拂柳，剑势绵绵。",
+      "effects": [
+        {
+          "action": "damage",
+          "value": 2,
+          "times": 3,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "造成3点伤害3次",
+        "effects": [
+          {
+            "action": "damage",
+            "value": 3,
+            "times": 3,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/sword_dance.png"
+    },
+    {
+      "id": "xu_shi",
+      "name": "蓄势",
+      "type": "basic",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 1,
+      "description": "抽1张牌。强化【一剑】+6伤害",
+      "flavor": "蓄剑于鞘，待时而动。",
+      "effects": [
+        {
+          "action": "draw",
+          "value": 1,
+          "target": "self"
+        },
+        {
+          "action": "enhance_one_sword",
+          "value": 6,
+          "target": "one_sword"
+        }
+      ],
+      "upgrade": {
+        "description": "抽1张牌。强化【一剑】+12伤害",
+        "effects": [
+          {
+            "action": "draw",
+            "value": 1,
+            "target": "self"
+          },
+          {
+            "action": "enhance_one_sword",
+            "value": 12,
+            "target": "one_sword"
+          }
+        ]
+      },
+      "art": "Art/cards/strike.png"
+    },
+    {
+      "id": "ning_shen_ju_shi",
+      "name": "凝神聚势",
+      "type": "skill",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 0,
+      "description": "获得3点护体罡气。强化【一剑】+4伤害",
+      "flavor": "凝神守中，势如垒卵。",
+      "effects": [
+        {
+          "action": "block",
+          "value": 3,
+          "target": "self"
+        },
+        {
+          "action": "enhance_one_sword",
+          "value": 4,
+          "target": "one_sword"
+        }
+      ],
+      "upgrade": {
+        "description": "获得8点护体罡气。强化【一剑】+8伤害",
+        "effects": [
+          {
+            "action": "block",
+            "value": 8,
+            "target": "self"
+          },
+          {
+            "action": "enhance_one_sword",
+            "value": 8,
+            "target": "one_sword"
+          }
+        ]
+      },
+      "art": "Art/cards/defend.png"
+    },
+    {
+      "id": "shou_shi",
+      "name": "收势",
+      "type": "body",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 1,
+      "description": "获得5点护体罡气。强化【一剑】+5伤害",
+      "flavor": "收剑归鞘，势蓄于身。",
+      "effects": [
+        {
+          "action": "block",
+          "value": 5,
+          "target": "self"
+        },
+        {
+          "action": "enhance_one_sword",
+          "value": 5,
+          "target": "one_sword"
+        }
+      ],
+      "upgrade": {
+        "description": "获得10点护体罡气。强化【一剑】+10伤害",
+        "effects": [
+          {
+            "action": "block",
+            "value": 10,
+            "target": "self"
+          },
+          {
+            "action": "enhance_one_sword",
+            "value": 10,
+            "target": "one_sword"
+          }
+        ]
+      },
+      "art": "Art/cards/defend.png"
+    },
+    {
+      "id": "hua_jian_wei_qi",
+      "name": "化剑为气",
+      "type": "skill",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 0,
+      "description": "获得2点灵力。本回合一剑灵力消耗为0。消耗",
+      "flavor": "剑气化灵，纵横无羁。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "gain_spirit",
+          "value": 2,
+          "target": "self"
+        },
+        {
+          "action": "one_sword_free",
+          "value": 0,
+          "target": "one_sword"
+        }
+      ],
+      "upgrade": {
+        "description": "获得3点灵力。本回合一剑灵力消耗为0。消耗",
+        "effects": [
+          {
+            "action": "gain_spirit",
+            "value": 3,
+            "target": "self"
+          },
+          {
+            "action": "one_sword_free",
+            "value": 0,
+            "target": "one_sword"
+          }
+        ]
+      },
+      "art": "Art/cards/spirit_gathering.png"
+    },
+    {
+      "id": "jian_yi_gong_ming",
+      "name": "剑意共鸣",
+      "type": "skill",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 1,
+      "description": "抽2张牌。本回一回合剑额外触发一次。消耗",
+      "flavor": "剑意相引，共鸣于心。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "draw",
+          "value": 2,
+          "target": "self"
+        },
+        {
+          "action": "one_sword_multiply",
+          "value": 0,
+          "target": "one_sword"
+        }
+      ],
+      "upgrade": {
+        "description": "抽3张牌。本回一回合剑额外触发一次。消耗",
+        "effects": [
+          {
+            "action": "draw",
+            "value": 3,
+            "target": "self"
+          },
+          {
+            "action": "one_sword_multiply",
+            "value": 0,
+            "target": "one_sword"
+          }
+        ]
+      },
+      "art": "Art/cards/bagua_mirror.png"
+    },
+    {
+      "id": "wan_jian_gui_zong",
+      "name": "万剑归宗",
+      "type": "zhaoshi",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 1,
+      "description": "造成3点伤害（每用一次+3）。保留",
+      "flavor": "万剑归宗，一剑破之。",
+      "retain": true,
+      "effects": [
+        {
+          "action": "wan_jian_damage",
+          "value": 3,
+          "stacks": 3,
+          "target": "all_enemies"
+        }
+      ],
+      "upgrade": {
+        "description": "造成5点伤害（每用一次+4）。保留",
+        "effects": [
+          {
+            "action": "wan_jian_damage",
+            "value": 5,
+            "stacks": 4,
+            "target": "all_enemies"
+          }
+        ]
+      },
+      "art": "Art/cards/myriad_swords.png"
+    },
+    {
+      "id": "one_sword",
+      "name": "一剑",
+      "type": "zhaoshi",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 3,
+      "description": "对所有敌人造成9点伤害（每层强化+6）。保留，消失",
+      "flavor": "一剑破万法。",
+      "retain": true,
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "one_sword_strike",
+          "value": 9,
+          "target": "all_enemies"
+        }
+      ],
+      "art": "Art/cards/heavenly_thunder.png"
+    },
+    {
+      "id": "jian_yi_bu_jue",
+      "name": "剑意不绝",
+      "type": "gongfa",
+      "class": "sword",
+      "rarity": "uncommon",
+      "cost": 1,
+      "description": "功法：每打出一张基础卡或招式卡，强化【一剑】+3伤害（每回合至多3次）。消耗",
+      "flavor": "剑意绵延，不绝如缕。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "power",
+          "status": "sword_art_flow",
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "功法：每打出一张基础卡或招式卡，强化【一剑】+4伤害（每回合至多3次）。消耗",
+        "effects": [
+          {
+            "action": "power",
+            "status": "sword_art_flow",
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/gongfa_sword_intent.png"
+    },
+    {
+      "id": "yi_jian_gui_zhen_jue",
+      "name": "一剑归真诀",
+      "type": "gongfa",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 1,
+      "description": "功法：你的一剑不再消失，保留所有强化。每回合第一次打出一剑时，生成一张临时复制。消耗",
+      "flavor": "万法归一，一剑归真。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "power",
+          "status": "one_sword_return",
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "功法：你的一剑不再消失，保留所有强化。每回合第一次打出一剑时，生成一张临时复制。消耗",
+        "effects": [
+          {
+            "action": "power",
+            "status": "one_sword_return",
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/gongfa_heart_clear.png"
+    },
+    {
+      "id": "fireball",
+      "name": "火球术",
+      "type": "spell",
+      "class": "fuxiu",
+      "rarity": "common",
+      "cost": 1,
+      "description": "造成9点伤害",
+      "flavor": "灵火一点，燎原可期。",
+      "effects": [
+        {
+          "action": "damage",
+          "value": 9,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "造成11点伤害",
+        "effects": [
+          {
+            "action": "damage",
+            "value": 11,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/fireball.png"
+    },
+    {
+      "id": "talisman_fire",
+      "name": "符火",
+      "type": "talisman",
+      "class": "fuxiu",
+      "rarity": "common",
+      "cost": 1,
+      "description": "造成4点伤害，施加3层灼烧",
+      "flavor": "符纸燃尽，真火不熄。",
+      "effects": [
+        {
+          "action": "damage",
+          "value": 4,
+          "target": "enemy"
+        },
+        {
+          "action": "apply_status",
+          "status": "burn",
+          "stacks": 3,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "造成6点伤害，施加4层灼烧",
+        "effects": [
+          {
+            "action": "damage",
+            "value": 6,
+            "target": "enemy"
+          },
+          {
+            "action": "apply_status",
+            "status": "burn",
+            "stacks": 4,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/talisman_fire.png"
+    },
+    {
+      "id": "wildfire",
+      "name": "烈火燎原",
+      "type": "spell",
+      "class": "fuxiu",
+      "rarity": "uncommon",
+      "cost": 2,
+      "description": "造成14点伤害，施加4层灼烧",
+      "flavor": "火海焚原，寸草不生。",
+      "effects": [
+        {
+          "action": "damage",
+          "value": 14,
+          "target": "enemy"
+        },
+        {
+          "action": "apply_status",
+          "status": "burn",
+          "stacks": 4,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "造成18点伤害，施加5层灼烧",
+        "effects": [
+          {
+            "action": "damage",
+            "value": 18,
+            "target": "enemy"
+          },
+          {
+            "action": "apply_status",
+            "status": "burn",
+            "stacks": 5,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/wildfire.png"
+    },
+    {
+      "id": "poison_palm",
+      "name": "毒砂掌",
+      "type": "body",
+      "class": "danxiu",
+      "rarity": "common",
+      "cost": 1,
+      "description": "造成3点伤害，施加4层中毒",
+      "flavor": "五毒淬掌，触之即溃。",
+      "effects": [
+        {
+          "action": "damage",
+          "value": 3,
+          "target": "enemy"
+        },
+        {
+          "action": "apply_status",
+          "status": "poison",
+          "stacks": 4,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "造成5点伤害，施加3层中毒",
+        "effects": [
+          {
+            "action": "damage",
+            "value": 5,
+            "target": "enemy"
+          },
+          {
+            "action": "apply_status",
+            "status": "poison",
+            "stacks": 3,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/poison_palm.png"
+    },
+    {
+      "id": "venom_burst",
+      "name": "万毒蚀心",
+      "type": "spell",
+      "class": "danxiu",
+      "rarity": "rare",
+      "cost": 2,
+      "description": "使目标中毒层数翻倍；若未中毒，施加4层中毒",
+      "flavor": "万毒蚀心，无药可解。",
+      "effects": [
+        {
+          "action": "amplify_status",
+          "status": "poison",
+          "value": 2,
+          "stacks": 4,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "使目标中毒层数变为三倍；若未中毒，施加6层中毒",
+        "effects": [
+          {
+            "action": "amplify_status",
+            "status": "poison",
+            "value": 3,
+            "stacks": 6,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/venom_burst.png"
+    },
+    {
+      "id": "flying_sword",
+      "name": "御剑术",
+      "type": "sword",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 2,
+      "description": "造成20点伤害",
+      "flavor": "剑去如虹，取敌首级。",
+      "effects": [
+        {
+          "action": "damage",
+          "value": 20,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "造成25点伤害",
+        "effects": [
+          {
+            "action": "damage",
+            "value": 25,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/flying_sword.png"
+    },
+    {
+      "id": "sword_qi",
+      "name": "剑气纵横",
+      "type": "sword",
+      "class": "sword",
+      "rarity": "uncommon",
+      "cost": 2,
+      "description": "对所有敌人造成15点伤害",
+      "flavor": "一剑既出，八方皆敌。",
+      "effects": [
+        {
+          "action": "damage_all",
+          "value": 15,
+          "target": "all_enemies"
+        }
+      ],
+      "upgrade": {
+        "description": "对所有敌人造成20点伤害",
+        "effects": [
+          {
+            "action": "damage_all",
+            "value": 20,
+            "target": "all_enemies"
+          }
+        ]
+      },
+      "art": "Art/cards/sword_qi.png"
+    },
+    {
+      "id": "armor_break",
+      "name": "破甲击",
+      "type": "sword",
+      "class": "sword",
+      "rarity": "uncommon",
+      "cost": 1,
+      "description": "造成5点伤害，施加2层易伤",
+      "flavor": "以点破面，无坚不摧。",
+      "effects": [
+        {
+          "action": "damage",
+          "value": 5,
+          "target": "enemy"
+        },
+        {
+          "action": "apply_status",
+          "status": "vulnerable",
+          "stacks": 2,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "造成7点伤害，施加3层易伤",
+        "effects": [
+          {
+            "action": "damage",
+            "value": 7,
+            "target": "enemy"
+          },
+          {
+            "action": "apply_status",
+            "status": "vulnerable",
+            "stacks": 3,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/armor_break.png"
+    },
+    {
+      "id": "shuang_ren_jian_yi_jue",
+      "name": "双刃剑意诀",
+      "type": "gongfa",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 1,
+      "description": "功法：你的力量获取翻倍。若出牌阶段结束时本回合未获得过力量，失去所有力量。消耗",
+      "flavor": "双刃之锋，伤人伤己。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "power",
+          "status": "double_strength",
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "功法：你的力量获取翻倍。若出牌阶段结束时本回合未获得过力量，失去所有力量。消耗",
+        "effects": [
+          {
+            "action": "power",
+            "status": "double_strength",
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/gongfa_sword_intent.png"
+    },
+    {
+      "id": "jian_xu_yi_ke",
+      "name": "剑墟遗刻",
+      "type": "gongfa",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 1,
+      "description": "功法：每回合你的第一张基础卡额外获得1层力量。消耗",
+      "flavor": "古剑遗墟，刻痕犹在。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "power",
+          "status": "sword_relic_inscription",
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "功法：每回合你的第一张基础卡额外获得2层力量。消耗",
+        "effects": [
+          {
+            "action": "power",
+            "status": "sword_relic_inscription",
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/gongfa_flow.png"
+    },
+    {
+      "id": "mind_sever",
+      "name": "斩念诀",
+      "type": "skill",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 1,
+      "description": "获得3层力量。消耗",
+      "flavor": "斩断杂念，剑心自明。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "apply_status",
+          "status": "strength",
+          "stacks": 3,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "获得4层力量。消耗",
+        "effects": [
+          {
+            "action": "apply_status",
+            "status": "strength",
+            "stacks": 4,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/mind_sever.png"
+    },
+    {
+      "id": "sword_heart",
+      "name": "剑心",
+      "type": "skill",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 1,
+      "description": "获得3层力量。保留。消耗",
+      "flavor": "剑心通明，蓄势待发。",
+      "exhaust": true,
+      "retain": true,
+      "effects": [
+        {
+          "action": "apply_status",
+          "status": "strength",
+          "stacks": 3,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "获得4层力量。保留。消耗",
+        "effects": [
+          {
+            "action": "apply_status",
+            "status": "strength",
+            "stacks": 4,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/sword_heart.png"
+    },
+    {
+      "id": "xu_jian_jue",
+      "name": "蓄剑诀",
+      "type": "gongfa",
+      "class": "sword",
+      "rarity": "uncommon",
+      "cost": 1,
+      "description": "功法：你每打出一张基础卡或功法卡，获得1层临时力量（回合结束消失）。消耗",
+      "flavor": "意凝于剑，无往不利。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "power",
+          "status": "sword_intent",
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "功法：你每打出一张基础卡或功法卡，获得1层临时力量（回合结束消失）。消耗",
+        "effects": [
+          {
+            "action": "power",
+            "status": "sword_intent",
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/gongfa_sword_intent.png"
+    },
+    {
+      "id": "gongfa_heart_clear",
+      "name": "剑心通明经",
+      "type": "gongfa",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 1,
+      "description": "功法：你的基础卡效果生效两次。消耗",
+      "flavor": "心若明镜，剑随心动。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "power",
+          "status": "heart_clear",
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "功法：你的基础卡效果生效两次。消耗",
+        "effects": [
+          {
+            "action": "power",
+            "status": "heart_clear",
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/gongfa_heart_clear.png"
+    },
+    {
+      "id": "gongfa_flow",
+      "name": "流水剑经",
+      "type": "gongfa",
+      "class": "sword",
+      "rarity": "uncommon",
+      "cost": 1,
+      "description": "功法：你每打出一张基础卡，抽1张牌（每回合至多2次）。消耗",
+      "flavor": "剑如流水，连绵不绝。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "power",
+          "status": "flow_sutra",
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "功法：你每打出一张基础卡，抽1张牌（每回合至多2次）。消耗",
+        "effects": [
+          {
+            "action": "power",
+            "status": "flow_sutra",
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/gongfa_flow.png"
+    },
+    {
+      "id": "gongfa_gang",
+      "name": "剑罡护体功",
+      "type": "gongfa",
+      "class": "sword",
+      "rarity": "uncommon",
+      "cost": 1,
+      "description": "功法：每回合开始时，获得力量层数×3点护体罡气。消耗",
+      "flavor": "剑罡护体，固若金汤。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "power",
+          "status": "sword_gang",
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "功法：每回合开始时，获得力量层数×3点护体罡气。消耗",
+        "effects": [
+          {
+            "action": "power",
+            "status": "sword_gang",
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/gongfa_gang.png"
+    },
+    {
+      "id": "gongfa_counter",
+      "name": "听劲反击诀",
+      "type": "gongfa",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 1,
+      "description": "功法：你受到敌方攻击时，反击攻击者3点伤害。消耗",
+      "flavor": "听劲辨力，后发先至。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "power",
+          "status": "counter_stance",
+          "value": 3,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "功法：你受到敌方攻击时，反击攻击者5点伤害。消耗",
+        "effects": [
+          {
+            "action": "power",
+            "status": "counter_stance",
+            "value": 5,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/gongfa_counter.png"
+    },
+    {
+      "id": "vajra",
+      "name": "金刚诀",
+      "type": "body",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 2,
+      "description": "获得20点护体罡气",
+      "flavor": "佛门金身，万法不侵。",
+      "effects": [
+        {
+          "action": "block",
+          "value": 20,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "获得25点护体罡气",
+        "effects": [
+          {
+            "action": "block",
+            "value": 25,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/vajra.png"
+    },
+    {
+      "id": "lightness",
+      "name": "轻身术",
+      "type": "body",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 1,
+      "description": "获得5点护体罡气，抽1张牌",
+      "flavor": "身轻如燕，踏雪无痕。",
+      "effects": [
+        {
+          "action": "block",
+          "value": 5,
+          "target": "self"
+        },
+        {
+          "action": "draw",
+          "value": 1,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "获得7点护体罡气，抽1张牌",
+        "effects": [
+          {
+            "action": "block",
+            "value": 7,
+            "target": "self"
+          },
+          {
+            "action": "draw",
+            "value": 1,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/lightness.png"
+    },
+    {
+      "id": "rock_skin",
+      "name": "磐石诀",
+      "type": "body",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 1,
+      "description": "获得8点护体罡气，每层力量额外+2。保留",
+      "flavor": "磐石之固，岿然不动。",
+      "retain": true,
+      "effects": [
+        {
+          "action": "block_per_status",
+          "value": 8,
+          "stacks": 2,
+          "status": "strength",
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "获得10点护体罡气，每层力量额外+3。保留",
+        "effects": [
+          {
+            "action": "block_per_status",
+            "value": 10,
+            "stacks": 3,
+            "status": "strength",
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/rock_skin.png"
+    },
+    {
+      "id": "jade_talisman",
+      "name": "护身玉符",
+      "type": "talisman",
+      "class": "sword",
+      "rarity": "uncommon",
+      "cost": 1,
+      "description": "获得10点护体罡气",
+      "flavor": "玉符护主，邪祟不近。",
+      "effects": [
+        {
+          "action": "block",
+          "value": 10,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "获得13点护体罡气",
+        "effects": [
+          {
+            "action": "block",
+            "value": 13,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/jade_talisman.png"
+    },
+    {
+      "id": "tie_bi_jue",
+      "name": "铁壁诀",
+      "type": "body",
+      "class": "sword",
+      "rarity": "common",
+      "cost": 1,
+      "description": "获得6点护体罡气。每层力量额外+3罡气",
+      "flavor": "铁壁横拦，万夫莫开。",
+      "effects": [
+        {
+          "action": "block_per_status",
+          "value": 6,
+          "status": "strength",
+          "stacks": 3,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "获得8点护体罡气。每层力量额外+4罡气",
+        "effects": [
+          {
+            "action": "block_per_status",
+            "value": 8,
+            "status": "strength",
+            "stacks": 4,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/defend.png"
+    },
+    {
+      "id": "qi_resonance_sword",
+      "name": "罡气共鸣剑",
+      "type": "sword",
+      "class": "sword",
+      "rarity": "uncommon",
+      "cost": 2,
+      "description": "造成10点伤害，再造成等同于你当前罡气的伤害",
+      "flavor": "罡气所至，剑意所及。",
+      "effects": [
+        {
+          "action": "damage",
+          "value": 10,
+          "target": "enemy"
+        },
+        {
+          "action": "damage_per_block",
+          "value": 0,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "造成13点伤害，再造成等同于你当前罡气的伤害",
+        "effects": [
+          {
+            "action": "damage",
+            "value": 13,
+            "target": "enemy"
+          },
+          {
+            "action": "damage_per_block",
+            "value": 0,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/qi_resonance_sword.png"
+    },
+    {
+      "id": "yi_shou_wei_gong",
+      "name": "以守为攻",
+      "type": "skill",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 1,
+      "description": "获得3层力量。若本回合获得过护甲，改为获得6层力量。消耗",
+      "flavor": "守中有攻，剑出无形。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "power",
+          "status": "defense_to_strength",
+          "value": 3,
+          "stacks": 3,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "获得4层力量。若本回合获得过护甲，改为获得8层力量。消耗",
+        "effects": [
+          {
+            "action": "power",
+            "status": "defense_to_strength",
+            "value": 4,
+            "stacks": 4,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/mind_sever.png"
+    },
+    {
+      "id": "gang_qi_fan_zhen",
+      "name": "罡气反震",
+      "type": "gongfa",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 1,
+      "description": "功法：你每次受到敌人攻击时，造成3点伤害返还。消耗",
+      "flavor": "罡气护体，反震八方。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "power",
+          "status": "thorns_aura",
+          "value": 3,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "功法：你每次受到敌人攻击时，造成5点伤害返还。消耗",
+        "effects": [
+          {
+            "action": "power",
+            "status": "thorns_aura",
+            "value": 5,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/gongfa_counter.png"
+    },
+    {
+      "id": "zhaoshi_annihilate",
+      "name": "一剑破万法",
+      "type": "zhaoshi",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 2,
+      "description": "造成16点伤害，每层力量额外追加10点伤害",
+      "flavor": "一剑破万法，天下无难事。",
+      "effects": [
+        {
+          "action": "damage_per_status",
+          "value": 16,
+          "status": "strength",
+          "stacks": 8,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "造成16点伤害，每层力量额外追加12点伤害",
+        "effects": [
+          {
+            "action": "damage_per_status",
+            "value": 20,
+            "status": "strength",
+            "stacks": 10,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/zhaoshi_annihilate.png"
+    },
+    {
+      "id": "zhaoshi_guard",
+      "name": "守剑式",
+      "type": "zhaoshi",
+      "class": "sword",
+      "rarity": "uncommon",
+      "cost": 1,
+      "description": "获得8点护体罡气，每层力量额外+3罡气",
+      "flavor": "守中藏攻，剑气内敛。",
+      "effects": [
+        {
+          "action": "block_per_status",
+          "value": 8,
+          "status": "strength",
+          "stacks": 3,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "获得10点护体罡气，每层力量额外+4罡气",
+        "effects": [
+          {
+            "action": "block_per_status",
+            "value": 10,
+            "status": "strength",
+            "stacks": 4,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/zhaoshi_guard.png"
+    },
+    {
+      "id": "zhaoshi_free",
+      "name": "无妄剑境",
+      "type": "zhaoshi",
+      "class": "sword",
+      "rarity": "rare",
+      "cost": 1,
+      "description": "本回合你的基础卡与功法卡灵力消耗为0。消耗",
+      "flavor": "心无妄念，剑无拘束。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "cost_free_basic_gongfa",
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "本回合你的基础卡与功法卡灵力消耗为0。消耗",
+        "effects": [
+          {
+            "action": "cost_free_basic_gongfa",
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/zhaoshi_free.png"
+    },
+    {
+      "id": "zhaoshi_record",
+      "name": "万剑朝宗式",
+      "type": "zhaoshi",
+      "class": "sword",
+      "rarity": "uncommon",
+      "cost": 2,
+      "description": "造成2点伤害。此卡在手牌中时你每打出一次基础卡重复一次",
+      "flavor": "万剑朝宗，剑痕为证。",
+      "retain": true,
+      "counter_condition": "on_basic_play",
+      "effects": [
+        {
+          "action": "damage_all_per_repeat",
+          "value": 2,
+          "target": "all_enemies"
+        }
+      ],
+      "upgrade": {
+        "description": "造成3点伤害。此卡在手牌中时你每打出一次基础卡重复一次",
+        "counter_condition": "on_basic_play",
+        "effects": [
+          {
+            "action": "damage_all_per_repeat",
+            "value": 3,
+            "target": "all_enemies"
+          }
+        ]
+      },
+      "art": "Art/cards/zhaoshi_record.png"
+    },
+    {
+      "id": "heaven_sword_art",
+      "name": "天剑诀",
+      "type": "zhaoshi",
+      "class": "sword",
+      "rarity": "legendary",
+      "cost": 3,
+      "description": "对所有敌人造成24点伤害，每层力量额外+8",
+      "flavor": "天剑一出，群邪辟易。",
+      "effects": [
+        {
+          "action": "damage_all_per_status",
+          "value": 24,
+          "status": "strength",
+          "stacks": 8,
+          "target": "all_enemies"
+        }
+      ],
+      "upgrade": {
+        "description": "对所有敌人造成32点伤害，每层力量额外+10",
+        "effects": [
+          {
+            "action": "damage_all_per_status",
+            "value": 32,
+            "status": "strength",
+            "stacks": 10,
+            "target": "all_enemies"
+          }
+        ]
+      },
+      "art": "Art/cards/heaven_sword_art.png"
+    },
+    {
+      "id": "one_breath",
+      "name": "一息千年",
+      "type": "skill",
+      "rarity": "legendary",
+      "cost": 0,
+      "description": "获得2点灵力，抽2张牌。消耗",
+      "flavor": "洞中方七日，世上已千年。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "gain_spirit",
+          "value": 2,
+          "target": "self"
+        },
+        {
+          "action": "draw",
+          "value": 2,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "获得2点灵力，抽3张牌。消耗",
+        "effects": [
+          {
+            "action": "gain_spirit",
+            "value": 2,
+            "target": "self"
+          },
+          {
+            "action": "draw",
+            "value": 3,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/one_breath.png"
+    },
+    {
+      "id": "sword_immortal_gongfa",
+      "name": "剑仙真解",
+      "type": "gongfa",
+      "class": "sword",
+      "rarity": "legendary",
+      "cost": 2,
+      "description": "功法：每回合开始时额外抽2张牌。消耗",
+      "flavor": "剑仙遗刻，悟者自成一派。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "power",
+          "status": "immortal_draw",
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 1,
+        "description": "功法：每回合开始时额外抽2张牌。消耗",
+        "effects": [
+          {
+            "action": "power",
+            "status": "immortal_draw",
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/sword_immortal_gongfa.png"
+    },
+    {
+      "id": "rejuvenation",
+      "name": "回春术",
+      "type": "spell",
+      "rarity": "common",
+      "cost": 1,
+      "description": "恢复6点气血。消耗",
+      "flavor": "枯木逢春，生机重现。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "heal",
+          "value": 6,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "恢复8点气血。消耗",
+        "effects": [
+          {
+            "action": "heal",
+            "value": 8,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/rejuvenation.png"
+    },
+    {
+      "id": "spirit_gathering",
+      "name": "聚灵阵",
+      "type": "talisman",
+      "rarity": "uncommon",
+      "cost": 1,
+      "description": "获得2点灵力",
+      "flavor": "聚灵成阵，源源不绝。",
+      "effects": [
+        {
+          "action": "gain_spirit",
+          "value": 2,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "cost": 0,
+        "description": "获得3点灵力",
+        "effects": [
+          {
+            "action": "gain_spirit",
+            "value": 3,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/spirit_gathering.png"
+    },
+    {
+      "id": "spirit_store",
+      "name": "储灵符",
+      "type": "talisman",
+      "rarity": "uncommon",
+      "cost": 0,
+      "description": "下回合额外获得2点灵力。消耗",
+      "flavor": "封存一缕灵，待用他日功。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "spirit_next_turn",
+          "value": 2,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "下回合额外获得3点灵力。消耗",
+        "effects": [
+          {
+            "action": "spirit_next_turn",
+            "value": 3,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/spirit_store.png"
+    },
+    {
+      "id": "bagua_mirror",
+      "name": "八卦镜",
+      "type": "talisman",
+      "rarity": "uncommon",
+      "cost": 1,
+      "description": "抽2张牌，随机弃1张牌",
+      "flavor": "镜转阴阳，虚实相生。",
+      "effects": [
+        {
+          "action": "draw",
+          "value": 2,
+          "target": "self"
+        },
+        {
+          "action": "discard_random",
+          "value": 1,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "抽3张牌，随机弃1张牌",
+        "effects": [
+          {
+            "action": "draw",
+            "value": 3,
+            "target": "self"
+          },
+          {
+            "action": "discard_random",
+            "value": 1,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/bagua_mirror.png"
+    },
+    {
+      "id": "blood_rite",
+      "name": "血祭术",
+      "type": "spell",
+      "rarity": "rare",
+      "cost": 0,
+      "description": "失去3点气血，获得2点灵力，抽2张牌。消耗",
+      "flavor": "以血为引，逆天而行。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "self_damage",
+          "value": 3,
+          "target": "self"
+        },
+        {
+          "action": "gain_spirit",
+          "value": 2,
+          "target": "self"
+        },
+        {
+          "action": "draw",
+          "value": 2,
+          "target": "self"
+        }
+      ],
+      "upgrade": {
+        "description": "失去2点气血，获得2点灵力，抽3张牌。消耗",
+        "effects": [
+          {
+            "action": "self_damage",
+            "value": 2,
+            "target": "self"
+          },
+          {
+            "action": "gain_spirit",
+            "value": 2,
+            "target": "self"
+          },
+          {
+            "action": "draw",
+            "value": 3,
+            "target": "self"
+          }
+        ]
+      },
+      "art": "Art/cards/blood_rite.png"
+    },
+    {
+      "id": "heavenly_thunder",
+      "name": "天雷诀",
+      "type": "spell",
+      "rarity": "rare",
+      "cost": 3,
+      "description": "造成28点伤害",
+      "flavor": "九天神雷，涤荡妖邪。",
+      "effects": [
+        {
+          "action": "damage",
+          "value": 28,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "造成28点伤害",
+        "effects": [
+          {
+            "action": "damage",
+            "value": 36,
+            "target": "enemy"
+          }
+        ]
+      },
+      "art": "Art/cards/heavenly_thunder.png"
+    },
+    {
+      "id": "curse_regret",
+      "name": "怨念",
+      "type": "curse",
+      "rarity": "common",
+      "cost": 0,
+      "description": "受到3点伤害。消耗",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "self_damage",
+          "value": 3,
+          "target": "self"
+        }
+      ],
+      "art": "Art/cards/defend.png"
+    }
+  ]
+}

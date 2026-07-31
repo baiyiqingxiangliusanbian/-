@@ -1,0 +1,254 @@
+{
+	"relics": [
+		{
+			"id": "soul_jade",
+			"name": "养魂玉",
+			"rarity": "common",
+			"description": "温润神魂。每场战斗开始时获得3点护体罡气",
+			"trigger": "combat_start",
+			"effect": {"action": "block", "value": 3, "target": "self"},
+			"art": "Art/relics/soul_jade.png"
+		},
+		{
+			"id": "spirit_pearl",
+			"name": "聚灵珠",
+			"rarity": "common",
+			"description": "汇聚灵气。每场战斗第一回合额外获得1点灵力",
+			"trigger": "combat_start",
+			"effect": {"action": "gain_spirit", "value": 1, "target": "self"},
+			"art": "Art/relics/spirit_pearl.png"
+		},
+		{
+			"id": "sword_seal",
+			"name": "青锋剑印",
+			"rarity": "uncommon",
+			"description": "剑修传承印记。战斗开始时获得1层力量",
+			"trigger": "combat_start",
+			"effect": {"action": "apply_status", "status": "strength", "stacks": 1, "target": "self"},
+			"art": "Art/relics/sword_seal.png"
+		},
+		{
+			"id": "turtle_shield",
+			"name": "龟甲盾",
+			"rarity": "common",
+			"description": "玄龟之甲。每场战斗开始时获得5点护体罡气",
+			"trigger": "combat_start",
+			"effect": {"action": "block", "value": 5, "target": "self"},
+			"art": "Art/relics/turtle_shield.png"
+		},
+		{
+			"id": "blood_orb",
+			"name": "血灵珠",
+			"rarity": "uncommon",
+			"description": "嗜血魔珠。每击杀一个敌人，恢复3点气血",
+			"trigger": "on_kill",
+			"effect": {"action": "heal", "value": 3, "target": "self"},
+			"art": "Art/relics/blood_orb.png"
+		},
+		{
+			"id": "soul_bell",
+			"name": "摄魂铃",
+			"rarity": "uncommon",
+			"description": "摄人心魄。敌人死亡时对随机敌人造成3点伤害",
+			"trigger": "on_kill",
+			"effect": {"action": "damage_random", "value": 3, "target": "random_enemy"},
+			"art": "Art/relics/soul_bell.png"
+		},
+		{
+			"id": "spirit_stone_bag",
+			"name": "灵石袋",
+			"rarity": "common",
+			"description": "鼓鼓囊囊的灵石袋。战斗胜利后额外获得5枚灵石",
+			"trigger": "on_victory",
+			"effect": {"action": "gain_gold", "value": 5, "target": "self"},
+			"art": "Art/relics/spirit_stone_bag.png"
+		},
+		{
+			"id": "qi_talisman",
+			"name": "聚气符",
+			"rarity": "rare",
+			"description": "上古符箓。每回合开始时额外抽1张牌",
+			"trigger": "turn_start",
+			"effect": {"action": "draw", "value": 1, "target": "self"},
+			"art": "Art/relics/qi_talisman.png"
+		},
+		{
+			"id": "pill_cauldron",
+			"name": "九转丹鼎",
+			"rarity": "rare",
+			"description": "丹道至宝。丹药效果提升50%，但服用时丹毒额外+1",
+			"trigger": "pill_modifier",
+			"modifier": 0.5,
+			"effect": {"action": "none", "value": 0, "target": "self"},
+			"art": "Art/relics/pill_cauldron.png"
+		},
+		{
+			"id": "loot_hook",
+			"name": "夺宝钩",
+			"rarity": "rare",
+			"description": "魔修惯用之物。杀人夺宝的收益提升50%",
+			"trigger": "on_loot",
+			"modifier": 0.5,
+			"effect": {"action": "none", "value": 0, "target": "self"},
+			"art": "Art/relics/loot_hook.png"
+		},
+
+		{
+			"id": "blood_war_token",
+			"name": "血战令",
+			"rarity": "uncommon",
+			"description": "越战越勇。每损失5%最大气血，攻击伤害+1",
+			"trigger": "none",
+			"condition": "hp_missing_5pct",
+			"modifier": 1.0,
+			"effect": {"action": "none", "value": 0, "target": "self"},
+			"art": "Art/relics/blood_war_token.png"
+		},
+		{
+			"id": "spirit_cherish_pendant",
+			"name": "惜灵佩",
+			"rarity": "uncommon",
+			"description": "惜灵如命。若上回合有未使用的手牌，本回合灵力+1",
+			"trigger": "turn_start",
+			"condition": "unused_hand",
+			"effect": {"action": "gain_spirit", "value": 1, "target": "self"},
+			"art": "Art/relics/spirit_cherish_pendant.png"
+		},
+		{
+			"id": "combo_talisman",
+			"name": "连击符",
+			"rarity": "rare",
+			"description": "攻势连绵。每打出3张牌，抽1张牌",
+			"trigger": "on_card_played",
+			"counter": 3,
+			"effect": {"action": "draw", "value": 1, "target": "self"},
+			"art": "Art/relics/combo_talisman.png"
+		},
+		{
+			"id": "vampire_bead",
+			"name": "嗜血珠",
+			"rarity": "uncommon",
+			"description": "噬血成性。每次对敌人造成伤害，恢复1点气血",
+			"trigger": "on_damage_dealt",
+			"condition": "heal_on_damage",
+			"effect": {"action": "heal", "value": 100, "target": "self"},
+			"art": "Art/relics/vampire_bead.png"
+		},
+		{
+			"id": "calm_pendant",
+			"name": "静心佩",
+			"rarity": "common",
+			"description": "心如止水。战斗开始时抽1张牌",
+			"trigger": "combat_start",
+			"effect": {"action": "draw", "value": 1, "target": "self"},
+			"art": "Art/relics/calm_pendant.png"
+		},
+		{
+			"id": "thunder_seal",
+			"name": "雷击符印",
+			"rarity": "rare",
+			"description": "天雷降世。每打出6张牌，对所有敌人造成4点伤害",
+			"trigger": "on_card_played",
+			"counter": 6,
+			"effect": {"action": "damage_all", "value": 4, "target": "all_enemies"},
+			"art": "Art/relics/thunder_seal.png"
+		},
+		{
+			"id": "emerald_scale",
+			"name": "翠鳞甲",
+			"rarity": "rare",
+			"description": "妖修鳞甲。战斗开始时获得2层力量",
+			"trigger": "combat_start",
+			"effect": {"action": "apply_status", "status": "strength", "stacks": 2, "target": "self"},
+			"art": "Art/relics/emerald_scale.png"
+		},
+		{
+			"id": "qi_bell",
+			"name": "罡气钟",
+			"rarity": "common",
+			"description": "古朴铜钟，敲响后罡气护体。战斗开始时获得8点护体罡气（首回合后消散）",
+			"trigger": "combat_start",
+			"effect": {"action": "block", "value": 8, "target": "self"},
+			"art": "Art/relics/qi_bell.png"
+		},
+		{
+			"id": "turtle_heart_mirror",
+			"name": "玄龟护心镜",
+			"rarity": "rare",
+			"description": "玄龟精魄所铸。每回合首次受到的攻击伤害减半",
+			"trigger": "none",
+			"condition": "first_damage_halve",
+			"modifier": 0.5,
+			"effect": {"action": "none", "value": 0, "target": "self"},
+			"art": "Art/relics/turtle_heart_mirror.png"
+		},
+		{
+			"id": "return_pearl",
+			"name": "归元珠",
+			"rarity": "uncommon",
+			"description": "弃而不散，归元复始。每当你弃牌时，每弃1张牌获得1点护体罡气",
+			"trigger": "on_cards_discarded",
+			"condition": "per_discarded_card",
+			"effect": {"action": "block", "value": 1, "target": "self"},
+			"art": "Art/relics/return_pearl.png"
+		},
+		{
+			"id": "sword_rain_box",
+			"name": "剑雨匣",
+			"rarity": "rare",
+			"description": "匣藏千剑。每当弃牌堆洗回抽牌堆时，对所有敌人造成6点伤害",
+			"trigger": "on_reshuffle",
+			"effect": {"action": "damage_all", "value": 6, "target": "all_enemies"},
+			"art": "Art/relics/sword_rain_box.png"
+		},
+		{
+			"id": "poison_cauldron",
+			"name": "万毒鼎",
+			"rarity": "rare",
+			"description": "鼎炼万毒。你施加的中毒层数+1",
+			"trigger": "none",
+			"condition": "status_boost_poison",
+			"modifier": 1,
+			"effect": {"action": "none", "value": 0, "target": "self"},
+			"art": "Art/relics/poison_cauldron.png"
+		},
+		{
+			"id": "fire_seal",
+			"name": "离火印",
+			"rarity": "rare",
+			"description": "离火燎原。你施加的灼烧层数+1",
+			"trigger": "none",
+			"condition": "status_boost_burn",
+			"modifier": 1,
+			"effect": {"action": "none", "value": 0, "target": "self"},
+			"art": "Art/relics/fire_seal.png"
+		},
+		{
+			"id": "immortal_sword_heart",
+			"name": "剑仙之心",
+			"rarity": "legendary",
+			"description": "剑仙遗蜕所化。战斗开始时获得3层剑意（力量）",
+			"trigger": "combat_start",
+			"effect": {"action": "apply_status", "status": "strength", "stacks": 3, "target": "self"},
+			"art": "Art/relics/immortal_sword_heart.png"
+		},
+		{
+			"id": "chaos_pearl",
+			"name": "混沌珠",
+			"rarity": "legendary",
+			"description": "混沌初开时的灵珠。每回合开始时获得1点灵力",
+			"trigger": "turn_start",
+			"effect": {"action": "gain_spirit", "value": 1, "target": "self"},
+			"art": "Art/relics/chaos_pearl.png"
+		},
+		{
+			"id": "primordial_sword",
+			"name": "太初剑胎",
+			"rarity": "legendary",
+			"description": "天地未分时的剑胎。战斗开始时获得12点护体罡气",
+			"trigger": "combat_start",
+			"effect": {"action": "block", "value": 12, "target": "self"},
+			"art": "Art/relics/primordial_sword.png"
+		}
+	]
+}

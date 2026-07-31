@@ -1,0 +1,41 @@
+{
+	"toxicity_threshold": 5,
+	"toxicity_penalty": "丹毒攻心：每回合开始受到等同于丹毒值的伤害",
+	"pills": [
+		{
+			"id": "qi_pill",
+			"name": "聚气丹",
+			"description": "战斗中使用：本回合获得2点灵力",
+			"toxicity": 1,
+			"effect": {"action": "gain_spirit", "value": 2, "target": "self"}
+		},
+		{
+			"id": "heal_pill",
+			"name": "回元丹",
+			"description": "恢复10点气血",
+			"toxicity": 1,
+			"effect": {"action": "heal", "value": 10, "target": "self"}
+		},
+		{
+			"id": "burst_pill",
+			"name": "暴血丹",
+			"description": "本场战斗获得3层力量",
+			"toxicity": 2,
+			"effect": {"action": "apply_status", "status": "strength", "stacks": 3, "target": "self"}
+		},
+		{
+			"id": "iron_pill",
+			"name": "铁骨丹",
+			"description": "获得12点护体罡气",
+			"toxicity": 1,
+			"effect": {"action": "block", "value": 12, "target": "self"}
+		},
+		{
+			"id": "detox_pill",
+			"name": "清毒丹",
+			"description": "丹毒值清零",
+			"toxicity": 0,
+			"effect": {"action": "cleanse_toxicity", "value": 0, "target": "self"}
+		}
+	]
+}
