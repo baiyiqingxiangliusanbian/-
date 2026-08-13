@@ -1,0 +1,70 @@
+{
+  "schema_version": "3.0",
+  "router": "[content-tools 路由]\n世界书正则只负责高召回地插入可能相关的变量与工具说明，绝不等同于事实判定。你必须阅读完整result_summary与consequence_intent，判断主体、完成性、否定、所有权和持续性。已有内容优先按名称与语义复用；永久库没有合适内容且玩家确实取得持久内容时才原创。只输出能力清单允许的变量差分与工具，不发明函数名。",
+  "entries": [
+    {
+      "id": "route.ownership_gain",
+      "trigger_regex": ["(收入|收下|收进|收好|捡起|拾起|拾得|接过|取得|获得|拿到|取走|带走|缴获|夺得|赢得|获赠|赠予|交付|托付|传授|继承|掌握|领悟|学会|习得|炼化|认主|收服|入队|加入队伍|正式跟随|随你而去|归你所有|成为你的)"],
+      "activate": ["rules.ownership_gain", "tools.content_lookup", "forge.card", "forge.card.examples", "forge.relic_or_companion"],
+      "content": "[route:ownership_gain]\n检测到可能的获得、学习、炼化、收服或入队表达；这只是召回信号，不能直接授予内容。"
+    },
+    {
+      "id": "rules.ownership_gain",
+      "content": "[rules.ownership_gain]\n逐分支判断：获得者是否为玩家；动作是否已经完成；是否存在没有、未能、拒绝、试图、险些、如果等否定或假设；对象是否只是被看见、检查或短暂触碰；玩家是否会持续拥有、掌握或同行。玩家一旦明确接过、捡起、拾得、收入怀中、收好或带走一个或多个实体物品，就属于已完成并持续持有：逐项登记item/ownership，并在同一分支至少授予一张对应道痕卡。不要判断物品是否具有战斗用途；普通用品、地图、食物、工具与剧情信物同样会成为经历留下的卡。多个同时取得的物品允许按共同场景、用途或意象合并成一张卡，不要求一物一卡。"
+    },
+    {
+      "id": "tools.content_lookup",
+      "content": "[tools.content_lookup]\n确认玩家实际取得实体物品后，先查现有卡牌名称目录：有语义相符的卡就直接授予，没有就创建原创卡并在本分支实际授予。每批取得的一个或多个物品至少对应一张卡；多个物品可按共同场景、用途、材质、取得方式或组合关系合并为一张概念卡。卡牌玩法从物品意象中提炼，不以‘有没有战斗用途’作为门槛，也不能只登记item/ownership。持续被动法宝、伙伴、灵兽仍可另用法宝系统登记。允许可运行近似，但不得因为机制难而退化成0费抽1。"
+    },
+    {
+      "id": "route.ownership_loss",
+      "trigger_regex": ["(失去|遗失|丢失|丢弃|抛弃|交出|献出|献祭|归还|送出|卖掉|被夺|被抢|夺走|抢走|损毁|毁去|破碎|消耗|用尽|遗忘|废除|剔除|离队|背叛|解除契约|不再跟随)"],
+      "activate": ["rules.ownership_loss", "game.services"],
+      "content": "[route:ownership_loss]\n检测到可能的失去、消耗、献祭、遗忘或离队表达；这只是召回信号，不能直接移除内容。"
+    },
+    {
+      "id": "rules.ownership_loss",
+      "content": "[rules.ownership_loss]\n逐分支确认失去者是玩家、行为已经完成且对象原本确实属于玩家。险些被夺、拒绝交出、假装丢弃、暂时借出或他人失去都不改变玩家内容。剧情明确指定对象时按名称remove_card/remove_relic；只要求玩家自行选择代价时使用choose_remove_card，不替玩家选。"
+    },
+    {
+      "id": "forge.card",
+      "triggers": ["传承", "功法", "剑诀", "法术", "招式", "秘术", "玉简", "地图", "残图", "毒针", "符箓", "卷轴", "草药", "丹药", "木牌", "信笺", "信件", "信物", "线索"],
+      "content": "[forge.card]\n仅在玩家确实取得持久内容、且现有名称目录无合适对象时创建。先写mechanic_intent，再在心中列mechanic_profile：核心动词、主要资源、触发时机、代价或限制、最后如何兑现；题材特征必须至少落实到其中两项。先设计玩法，再从能力清单组合，不要从最熟悉的action反推故事。禁止把地图、信件、木牌、信物或陌生对象统一降格成抽牌卡；除非情节明确支持，禁止0费、抽1、无代价纯收益，也禁止收到修复错误后把原设计退化成抽牌卡。允许机制近似但必须可运行。type只能spell|sword|body|talisman|skill|gongfa，class只能空字符串|sword|danxiu|fuxiu，cost为0~3，effects最多8项。除基础action外，通用组件包括transfer、move_cards、copy_cards、modify_card_cost、upgrade_cards、transform_cards、shuffle_zone。trigger可用on_play|on_turn_start|on_turn_end|on_card_played|on_draw|on_discard|on_exhaust|on_reshuffle|on_damage_dealt|on_damage_taken|before_deal_damage|before_take_damage|before_gain_block|after_gain_block|after_spend_spirit|on_status_applied|on_kill；duration=instant|turn|combat，max_triggers=0~99。transfer可读event_value、回合/血量/灵力/罡气/牌区数量/目标状态以及var:KEY局内变量，可写玩家或目标数值、状态和var:KEY；write_mode为add|set|min|max|multiply，consume_source可消耗来源。condition原子可用&&和||组合，并支持event_tag_is:TAG与source_at_least:SOURCE=N/source_at_most/source_equals。牌区action的source为hand|draw|discard|exhaust|last_played，移动/复制destination为hand|draw|draw_top|draw_random|discard|exhaust，param选择器为random|any|highest_cost|lowest_cost|upgraded|non_upgraded|retained|exhausting|type:T|rarity:R|cost_at_most:N；value为1~3张，modify_card_cost用stacks=-3~3表示费用变化，transform_cards.destination写已有卡牌名称。可用var与阈值做积累—兑现，用事件标签限定牌型/状态，用牌区操作做回收、复制、变形和改费。状态只能strength|dexterity|weak|vulnerable|burn|poison|nightmare|temp_strength。description由本地根据真实机制生成；flavor只写世界内来历。"
+    },
+    {
+      "id": "forge.card.examples",
+      "content": "[forge.card.examples｜推理案例，不是固定模板]\n案例只演示从意象到机制的思路；禁止照抄名称、数值或结构，每次必须重新提炼当前对象。玩家已经取得实体物品时，应在本轮立即创建或授予卡牌，不要求物品本身已有战斗用途，也不要求剧情中已经把它用掉。多个物品可以合成一张卡：例如同时取得缺口柴刀、驱虫药丸、干柴和干饼，可以先抽象为‘炭窑搜检所得的一套残破求生物资’，再让柴刀的破损、药丸的一次性、干柴与干饼的储备感共同塑造机制；不要机械生成四张牌，也不要简化成0费抽1。①地图即使只记载通行路线也要形成卡；若标出三处藏宝地，mechanic_intent可进一步提炼为‘在未知路线中择一寻获’，合法近似示例为{\"name\":\"藏宝残图\",\"rarity\":\"uncommon\",\"type\":\"skill\",\"class\":\"\",\"cost\":1,\"exhaust\":true,\"effects\":[{\"action\":\"discover_draw\",\"trigger\":\"on_play\",\"duration\":\"instant\",\"value\":3,\"target\":\"self\"}]}；若设定每探索数次才找到宝藏，则用var:explore累计和阈值兑现。②‘化罡诀’把当前罡气化为力量的合法核心效果为{\"action\":\"transfer\",\"trigger\":\"on_play\",\"duration\":\"instant\",\"target\":\"self\",\"source\":\"self_block\",\"destination\":\"self_status:strength\",\"write_mode\":\"add\",\"consume_source\":true}；若改写以后本场所有罡气，则改用before_gain_block、duration=combat、source=event_value。③‘三墨成契’的核心是施法积墨、三层兑现：用on_card_played+event_tag_is:spell写var:ink，达到source_at_least:var:ink=3时copy_cards last_played并清零；不能简化成抽牌。④‘骨灰弹’是一次性迷眼/引火，合法扁平效果如{\"action\":\"apply_status\",\"trigger\":\"on_play\",\"duration\":\"instant\",\"target\":\"all_enemies\",\"status\":\"weak\",\"stacks\":1}，卡本身exhaust=true。所有effect字段必须直接平铺在effect对象，禁止params/arguments嵌套；type只能spell|sword|body|talisman|skill|gongfa，class只能空字符串|sword|danxiu|fuxiu，绝不能写weapon或consumable。好案例至少让核心动词、资源、时机、限制、兑现中的两项承载题材。"
+    },
+    {
+      "id": "forge.card.counter",
+      "trigger_regex": ["(计数|次数|每当|累计|叠加|连击|蓄力|层数|同名|重复释放)"],
+      "content": "[forge.card.counter]\ncounter_condition只能空字符串|on_basic_play|on_basic_gongfa_play|on_any_card_play|on_same_type_play|on_sword_play|on_spell_play|on_damage_dealt|on_draw|on_turn_start。需要跨出牌联动时优先使用counter_condition、condition=counter_at_least:N及scale_by=counter组合；不要用随机概率伪装确定条件。每张同名功法实例独立持有自己的计数与持续效果。"
+    },
+    {
+      "id": "forge.relic_or_companion",
+      "triggers": ["法器", "法宝", "灵兽", "伙伴", "器灵", "护符"],
+      "content": "[forge.relic_or_companion]\n只有明确具有持续被动作用的法宝、具名灵兽、伙伴或器灵才使用created_relics；普通物品和线索使用卡牌。正式跟随的伙伴以同名created_relics登记，flavor明确身份。trigger必须且只能是combat_start|turn_start|on_kill|on_victory|on_card_played|on_player_turn_end|on_damage_dealt|on_cards_discarded|on_reshuffle，绝不能填none、passive、always或空值；无法确定时使用combat_start。effect必须存在且只能damage_random|damage_all|block|draw|gain_spirit|heal|apply_status|gain_gold。高频trigger降低单次收益；on_card_played/on_damage_dealt的counter至少3；on_damage_dealt不得再次造成伤害。apply_status只允许target=self且status=strength|dexterity。"
+    },
+    {
+      "id": "forge.enemy",
+      "triggers": ["\"next\":\"combat\""],
+      "trigger_regex": ["(进入战斗|不可避免的冲突|敌人|袭击|追兵|妖兽|杀手|拦路|伏击|围攻|挑战|拔剑封路)"],
+      "content": "[forge.enemy]\n只有分支确实标记next=combat时才建立遭遇。优先从现有敌人模板名称中选取最接近者，并用name/story表现剧情身份。tier只能normal|elite|boss；hp_scale为0.7~2.5，intent_scale为0.75~1.8；abilities最多3项，只能使用first_strike、thorns:N、enrage_half:N、drain:N、regen:N、block_aura:N、poison_aura:N、start_weak:N、start_vulnerable:N、hand_limit:N、nightmare、gold_drop:N、curse_ritual:N。encounter.story必须说明敌人如何出现以及冲突为何不可避免。"
+    },
+    {
+      "id": "game.services",
+      "trigger_regex": ["(商店|坊市|集市|秘市|拍卖|交易|购买|出售|摊位|支付代价|献祭|剔除|删牌|遗忘|洗练|升级卡牌|强化卡牌|休息|疗伤|闭关|三选一奖励)"],
+      "content": "[game.services]\n商店使用open_shop；仙品特供固定rarity=legendary且price_multiplier=1.5。NPC要求玩家自己选择献祭/剔除哪张牌时使用choose_remove_card并填写count，不要擅自指定牌名；剧情明确夺走某张牌时用remove_card(name)。选择升级同理使用choose_upgrade_card。灵石或气血代价分别用gold/hp负数，并补gold_at_least或hp_above requirement，避免出现支付不起仍可选择。休息、奖励分别使用open_rest、open_reward。"
+    },
+    {
+      "id": "game.resources",
+      "trigger_regex": ["(受伤|负伤|重伤|中毒|毒发|流血|失血|气血受损|恢复|痊愈|疗伤|治愈|灵石|付钱|支付|花费|赚取|赏金|报酬)"],
+      "content": "[game.resources]\n只有玩家实际承受且已经发生的伤害、治疗、支付或收入才改变hp/gold。看到他人血迹、他人负伤、威胁将要受伤、攻击被挡住、没有支付成功都不得修改玩家数值。数值应与叙事严重程度相称，并满足能力清单中的范围与前置条件。"
+    },
+    {
+      "id": "game.narrative_state",
+      "trigger_regex": ["(线索|踪迹|秘密|情报|地图位置|发现地点|关系|信任|好感|敌意|仇恨|承诺|约定|结盟|盟友|委托|接受请求|完成委托|势力|声望|名望|通缉|地点|启程|抵达|时间过去)"],
+      "content": "[game.narrative_state]\n关系、线索、承诺、委托事实、地点、时间、势力态度等后续会读取的开放剧情事实写入对应choice.state_patch，只在该分支被玩家选中后提交。本游戏没有任务系统：这些事实不得显示成‘当前任务’，也不能冒充活跃游戏效果。使用简洁、稳定、可继续合并的键；不要把同一事实重复写成多组同义字段。根state_patch只放三个选项出现前已经共同发生的事实。"
+    }
+  ]
+}

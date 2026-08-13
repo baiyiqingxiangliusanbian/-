@@ -26,13 +26,21 @@ void UClickProxy::HandlePress()
 	}
 }
 
+void UClickProxy::HandleRelease()
+{
+	if (Owner.IsValid() && Tag == TEXT("hand_card"))
+	{
+		// UButton 会捕获鼠标/触点，因此即使拖出按钮范围也能在释放时结束拖牌。
+		Owner->OnMouseLeftReleased();
+	}
+}
+
 void UClickProxy::HandleHovered()
 {
 	if (!Owner.IsValid()) return;
 	if (Tag == TEXT("hand_hover") && BoundButton)
 	{
-		// 悬停：原生尺寸大卡预览（位图拉伸会让字体模糊，已弃用缩放方案）
-		BoundButton->SetRenderTranslation(FVector2D(0.f, -10.f));
+		// 直接放大扇形手牌中的原牌，不再创建第二张预览牌。
 		Owner->ShowCardPreview(Index);
 	}
 	else if (Tag == TEXT("relic_hover"))
@@ -46,8 +54,7 @@ void UClickProxy::HandleUnhovered()
 	if (!Owner.IsValid()) return;
 	if (Tag == TEXT("hand_hover") && BoundButton)
 	{
-		BoundButton->SetRenderTranslation(FVector2D::ZeroVector);
-		Owner->HideCardPreview();
+		Owner->HideCardPreview(Index);
 	}
 	else if (Tag == TEXT("relic_hover"))
 	{

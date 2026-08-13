@@ -1,0 +1,39 @@
+{
+  "schema_version": "2.0-direct-route",
+  "purpose": "剧情导演只需解释引擎已经抽中的结果；页面执行和原创卡锻造由本地分别完成。",
+  "architecture": [
+    "每轮剧情恰好一次模型调用，同时返回正文、三个选项、即时结果和next。",
+    "引擎在请求前分别为A/B/C抽签；模型不得改变、交换或否决抽签结果。",
+    "RP输出不包含operations、content_jobs、卡牌JSON、CardScript或生卡任务。",
+    "next=card_forge时只给card_concept；玩家选中后进入没有剧情的独立生卡环节，完成后直接加入卡组。",
+    "响应异常只记录日志并使用本地fallback，不重做整幕。",
+    "本游戏没有任务系统。"
+  ],
+  "destinations": [
+    {"next": "continue_rp", "meaning": "在RP中结算精确气血/灵石变化或纯人物世界结果后继续"},
+    {"next": "combat", "meaning": "立即进入战斗；必须提供encounter并停在第一击结算前"},
+    {"next": "card_forge", "meaning": "离开RP进入无剧情原创卡锻造；只提供card_concept"},
+    {"next": "shop", "meaning": "立即进入商店"},
+    {"next": "reward", "meaning": "立即进入三选一奖励"},
+    {"next": "rest", "meaning": "立即进入休息界面"},
+    {"next": "upgrade", "meaning": "立即选择升级一张卡"},
+    {"next": "remove", "meaning": "立即选择剔除一张卡"}
+  ],
+  "optional_variable_updates": [
+    "body/condition add|set|remove",
+    "item/ownership gain|lose",
+    "skill/knowledge learn|upgrade|forget",
+    "relationship/affinity add|set",
+    "relationship/bond set",
+    "environment/location set",
+    "environment/trait add|remove",
+    "environment/combat_edge add|set",
+    "faction/alert add|set",
+    "faction/trait add|remove"
+  ],
+  "choice_tendencies": {
+    "A": "激进，较高概率战斗，其余为正面奖赏",
+    "B": "较高概率进入原创卡锻造，其余为成长页面或正面收益",
+    "C": "从全部页面和正负数值结果中广泛抽取，行动风格大胆、荒诞、不可预测"
+  }
+}

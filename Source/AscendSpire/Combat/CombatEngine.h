@@ -95,6 +95,10 @@ public:
 	UPROPERTY(BlueprintReadOnly)
 	bool bVictory = false;
 
+	/** 梦魇跳过行动的当前回合：仍然抽牌，但不能出牌/服丹，结束回合后继续。 */
+	UPROPERTY(BlueprintReadOnly)
+	bool bPlayerTurnSkipped = false;
+
 	// ---------- API ----------
 
 	/** 初始化数据表（卡牌/敌人/法宝），返回是否成功 */
@@ -110,6 +114,11 @@ public:
 		const TArray<FString>& OwnedRelicIds, int32 PlayerMaxHP, int32 PlayerCurrentHP,
 		int32 EnemyHPBonus, int32 Seed, int32 EnemyLevel = 0);
 
+	/** 注册本局运行时生成的敌人数据。StartCombat 会在加载静态 JSON 后合并这些覆盖项。 */
+	void RegisterRuntimeEnemies(const TArray<FEnemyData>& RuntimeEnemies);
+	/** 注册本局 LLM 创作并已校验的卡牌与法宝。 */
+	void RegisterRuntimePlayerContent(const TArray<FCardData>& RuntimeCards, const TArray<FRelicData>& RuntimeRelics);
+
 	/** 出牌。HandIndex 手牌下标, TargetEnemyIndex 目标敌人下标 */
 	UFUNCTION(BlueprintCallable)
 	bool PlayCard(int32 HandIndex, int32 TargetEnemyIndex);
@@ -117,6 +126,13 @@ public:
 	/** 结束玩家回合（触发敌方回合，随后自动开始下一玩家回合） */
 	UFUNCTION(BlueprintCallable)
 	void EndPlayerTurn();
+
+	/** discover_draw 等选择效果生成的候选；选择完成前暂停其他战斗输入。 */
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FCardInstance> PendingDiscoverChoices;
+
+	/** 将一个候选从抽牌堆移动到手牌。 */
+	bool ResolveDiscoverChoice(int32 ChoiceIndex);
 
 	/** 服用丹药（累积丹毒；持有九转丹鼎时效果增强但丹毒+1） */
 	UFUNCTION(BlueprintCallable)
@@ -135,26 +151,50 @@ public:
 	int32 GetEffectiveCost(const FCardInstance& Card) const;
 
 	// ---------- 功法系统（打出后整场战斗生效） ----------
-	/** 已激活的功法ID（power 效果注入） */
+	/** 已激活的功法ID（power 效果注入；允许重复，每个元素代表一个独立实例） */
 	UPROPERTY(BlueprintReadOnly)
 	TArray<FString> ActivePowerIds;
 
-	/** 已激活的功法名（UI 展示） */
+	/** 已激活的功法名（UI 展示；与 ActivePowerIds 一一对应） */
 	UPROPERTY(BlueprintReadOnly)
 	TArray<FString> ActivePowerNames;
 
 	bool HasPower(const FString& PowerId) const { return ActivePowerIds.Contains(PowerId); }
+	/** 返回同一功法当前已运转的独立实例数量；同名功法不会互相覆盖。 */
+	int32 GetPowerCount(const FString& PowerId) const;
 	int32 GetOneSwordDamage() const { return 9 + OneSwordEnhance * 6; }
 	int32 GetOneSwordEnhance() const { return OneSwordEnhance; }
 
+	/** 解析 JSON 效果的动态数值，供战斗结算和卡面变量共用。 */
+	int32 ResolveEffectValue(const FCardEffect& Effect, const FCardInstance* Card = nullptr, int32 TargetEnemyIndex = -1) const;
+
 private:
+	struct FActiveCardRule
+	{
+		FCardEffect Effect;
+		FString SourceName;
+		int32 TriggerCount = 0;
+	};
+
 	TMap<FString, FCardData> CardTable;
 	TMap<FString, FEnemyData> EnemyTable;
 	TMap<FString, FRelicData> RelicTable;
 	TMap<FString, FPillData> PillTable;
+	/** 地图/剧情临时生成的敌人，不能写回静态 JSON。 */
+	TArray<FEnemyData> RuntimeEnemyOverrides;
+	TArray<FCardData> RuntimeCardOverrides;
+	TArray<FRelicData> RuntimeRelicOverrides;
 
 	TArray<FRelicData> ActiveRelics;
 	TArray<FRelicRuntimeState> RelicCounters;
+	/** 由原创卡注册的沙箱化事件规则；只保存数据，不执行任意原生代码。 */
+	TArray<FActiveCardRule> ActiveCardRules;
+	/** 任意 var:<id> 战斗变量，让原创规则可以保存充能、印记与阶段计数。 */
+	TMap<FString, int32> ScriptVariables;
+	int32 CurrentScriptEventValue = 0;
+	FString CurrentScriptEventTag;
+	int32 ScriptEventDepth = 0;
+	FCardInstance LastPlayedCard;
 	int32 CardsPlayedThisTurn = 0;
 	int32 LastTurnHandSize = 0;
 	FRandomStream Rng;
@@ -195,8 +235,11 @@ private:
 	int32 SwordArtFlowTriggeredThisTurn = 0;
 
 public:
-	/** 本轮刷新至今抽牌数（用于动画） */
+	/** 本轮刷新至今实际抽到的牌数（用于动画） */
 	int32 PendingDrawCount = 0;
+
+	/** 最近一次回合结束时进入弃牌堆的卡牌实例（用于 UI 弃牌动画） */
+	TArray<int32> PendingTurnEndDiscardUIDs;
 
 	/** 本回合第一张基础卡已打过（剑墟遗刻） */
 	bool bFirstBasicPlayedThisTurn = false;
@@ -217,12 +260,26 @@ public:
 
 	FCardInstance MakeCard(const FString& CardId) const;
 	void DrawCards(int32 Count);
+	void BeginDiscoverFromDrawPile(int32 SampleCount);
 	void StartPlayerTurn();
 	void RunEnemyPhase();
 	void CheckCombatEnd();
 
 	void ExecuteCardEffects(const FCardInstance& Card, int32 TargetEnemyIndex);
 	void ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIndex, bool bFromPlayer, const FCardInstance* Card = nullptr);
+	bool ShouldExecuteEffect(const FCardEffect& Effect, const FCardInstance* Card, int32 TargetEnemyIndex);
+	void RegisterCardRule(const FCardEffect& Effect, const FString& SourceName);
+	void TriggerCardRules(const FString& Trigger, int32& EventValue, int32 TargetEnemyIndex = -1,
+		const FString& EventTag = TEXT(""));
+	int32 ReadScriptValue(const FString& Source, int32 TargetEnemyIndex) const;
+	void WriteScriptValue(const FString& Destination, int32 Value, const FString& WriteMode,
+		int32 TargetEnemyIndex, const FString& SourceName);
+	TArray<FCardInstance>* ResolveCardZone(const FString& Zone);
+	const TArray<FCardInstance>* ResolveCardZone(const FString& Zone) const;
+	bool CardMatchesScriptSelector(const FCardInstance& Card, const FString& Selector) const;
+	void ExecuteCardZoneEffect(const FCardEffect& Effect);
+	/** Generic counters used by authored cards; matching cards in hand gain Amount stacks. */
+	void IncrementHandCounters(const FString& Event, const FString& PlayedCardType = TEXT(""), int32 Amount = 1);
 
 	/** 计算攻击伤害（含力量/虚弱/易伤修正） */
 	int32 CalcAttackDamage(int32 Base, FCombatantState& Attacker, FCombatantState& Defender) const;

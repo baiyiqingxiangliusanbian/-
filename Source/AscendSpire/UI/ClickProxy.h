@@ -30,6 +30,9 @@ public:
 	UFUNCTION()
 	void HandlePress();
 
+	UFUNCTION()
+	void HandleRelease();
+
 	UPROPERTY()
 	UButton* BoundButton;
 

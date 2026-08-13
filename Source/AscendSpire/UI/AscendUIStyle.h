@@ -63,11 +63,13 @@ public:
 		return FLinearColor(0.55f, 0.55f, 0.58f);
 	}
 
-	/** 中文字体（项目自带 DroidSansFallback，含完整 CJK） */
+	/** 中文字体：霞鹜文楷轻便版 Medium，SIL OFL 1.1，可随游戏分发。 */
 	static FSlateFontInfo Font(int32 Size)
 	{
-		static const FString FontPath = FPaths::ProjectContentDir() / TEXT("Fonts/DroidSansFallback.ttf");
-		FSlateFontInfo F(*FontPath, Size);
+		static const FString FontPath = FPaths::ProjectContentDir() / TEXT("Fonts/LXGWWenKaiLite-Medium.ttf");
+		// 文楷的汉字字面率比旧字体高，统一缩减约 8%，为 HUD 上下边缘留下呼吸空间。
+		const int32 VisualSize = FMath::Max(8, FMath::RoundToInt(Size * 0.92f));
+		FSlateFontInfo F(*FontPath, VisualSize);
 		return F;
 	}
 

@@ -24,9 +24,14 @@ struct FCardInstance
 	UPROPERTY(BlueprintReadOnly)
 	int32 RepeatCount = 0;
 
+	/** 本场战斗内的数据化费用修正，随卡牌实例在各区域间移动。 */
+	UPROPERTY(BlueprintReadOnly)
+	int32 CostModifier = 0;
+
 	int32 GetCost() const
 	{
-		return (bUpgraded && Data.UpgradedCost >= 0) ? Data.UpgradedCost : Data.Cost;
+		const int32 BaseCost = (bUpgraded && Data.UpgradedCost >= 0) ? Data.UpgradedCost : Data.Cost;
+		return FMath::Clamp(BaseCost + CostModifier, 0, 9);
 	}
 
 	const TArray<FCardEffect>& GetEffects() const

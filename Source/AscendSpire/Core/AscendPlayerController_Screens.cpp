@@ -3,6 +3,7 @@
 #include "UI/AscendUIStyle.h"
 #include "UI/AscendRootWidget.h"
 #include "UI/AscendArt.h"
+#include "UI/AscendCardLayout.h"
 #include "Components/Button.h"
 #include "Blueprint/UserWidget.h"
 #include "Components/Border.h"
@@ -31,6 +32,16 @@ using Style = FAscendUIStyle;
 
 namespace
 {
+	void PlaceCardWidget(UCanvasPanel* Canvas, UWidget* Widget, float X, float Y, float W, float H, float Scale, int32 ZOrder)
+	{
+		if (UCanvasPanelSlot* Slot = Canvas->AddChildToCanvas(Widget))
+		{
+			Slot->SetPosition(FVector2D(X * Scale, Y * Scale));
+			Slot->SetSize(FVector2D(W * Scale, H * Scale));
+			Slot->SetZOrder(ZOrder);
+		}
+	}
+
 	void Pad(UVerticalBox* Box, float Height)
 	{
 		USpacer* S = NewObject<USpacer>(Box);
@@ -83,6 +94,7 @@ FLinearColor RarityColor(const FString& Rarity)
 
 void AAscendPlayerController::ShowTitle()
 {
+	if (Run) Run->RefreshPersistentAuthoredContent();
 	UVerticalBox* Box = NewObject<UVerticalBox>(RootWidget);
 	Pad(Box, 120);
 
@@ -97,13 +109,25 @@ void AAscendPlayerController::ShowTitle()
 
 	UHorizontalBox* BtnRow = NewObject<UHorizontalBox>(Box);
 	BtnRow->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-	AddToHBox(BtnRow, MakeLinkedButton(BtnRow, TEXT("【 新的征程 】"), TEXT("title_new"), 0, 26));
+	AddToHBox(BtnRow, MakeLinkedButton(BtnRow, TEXT("【 新游戏 】"), TEXT("title_infinite"), 0, 26));
 	if (URunManager::HasSaveFile())
 	{
 		AddToHBox(BtnRow, MakeLinkedButton(BtnRow, TEXT("【 继续修行 】"), TEXT("title_continue"), 0, 26));
 	}
 	BtnRow->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
 	AddToVBox(Box, BtnRow);
+
+	UHorizontalBox* SettingsRow = NewObject<UHorizontalBox>(Box);
+	SettingsRow->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+	AddToHBox(SettingsRow, MakeLinkedButton(SettingsRow, TEXT("【 叙事设置 】"), TEXT("title_settings"), 0, 18));
+	if (Run && (Run->GetPersistentAuthoredCards().Num() > 0 || Run->GetPersistentAuthoredRelics().Num() > 0))
+	{
+		const int32 AuthoredCount = Run->GetPersistentAuthoredCards().Num() + Run->GetPersistentAuthoredRelics().Num();
+		AddToHBox(SettingsRow, MakeLinkedButton(SettingsRow,
+			FString::Printf(TEXT("【 永久原创库 %d 】"), AuthoredCount), TEXT("title_authored_library"), 0, 18));
+	}
+	SettingsRow->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+	AddToVBox(Box, SettingsRow, FMargin(0.f, 10.f));
 
 	Pad(Box, 40);
 	UTextBlock* Tip = Style::MakeText(Box, TEXT("一介散修，逆天改命。杀人夺宝，快意恩仇。"), 16, Style::DimGray());
@@ -129,6 +153,63 @@ void AAscendPlayerController::ShowTitle()
 	}
 
 	SetScreen(Box, EGameScreen::Title);
+}
+
+void AAscendPlayerController::ShowAuthoredLibrary()
+{
+	if (!Run) { ShowTitle(); return; }
+	Run->RefreshPersistentAuthoredContent();
+	UScrollBox* Scroll = NewObject<UScrollBox>(RootWidget);
+	UVerticalBox* Box = NewObject<UVerticalBox>(Scroll);
+	Scroll->AddChild(Box);
+	Pad(Box, 35.f);
+	UTextBlock* Title = Style::MakeText(Box, TEXT("永 久 原 创 库"), 38, Style::GoldYellow());
+	Title->SetJustification(ETextJustify::Center);
+	AddToVBox(Box, Title, FMargin(30.f, 8.f));
+	UTextBlock* Hint = Style::MakeText(Box,
+		TEXT("LLM 成功登记的原创卡牌、法宝与伙伴会跨存档保留。删除只移出永久库；已有存档内已经获得的内容仍随该存档保存。"),
+		16, Style::DimGray());
+	Hint->SetJustification(ETextJustify::Center);
+	Hint->SetAutoWrapText(true);
+	AddToVBox(Box, Hint, FMargin(100.f, 0.f, 100.f, 18.f));
+
+	auto AddDeleteRow = [this, Box](UWidget* Preview, const FString& DeleteTag, int32 Index)
+	{
+		UHorizontalBox* Row = NewObject<UHorizontalBox>(Box);
+		Row->AddChildToHorizontalBox(NewObject<USpacer>(Row))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		AddToHBox(Row, Preview, FMargin(10.f, 6.f));
+		AddToHBox(Row, MakeLinkedButton(Row, TEXT("【 删除永久记录 】"), DeleteTag, Index, 16), FMargin(18.f, 6.f));
+		Row->AddChildToHorizontalBox(NewObject<USpacer>(Row))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		AddToVBox(Box, Row, FMargin(12.f, 4.f));
+	};
+
+	if (Run->GetPersistentAuthoredCards().Num() > 0)
+	{
+		AddToVBox(Box, Style::MakeText(Box, TEXT("原创卡牌"), 25, Style::PaperWhite()), FMargin(80.f, 14.f, 80.f, 4.f));
+		for (int32 Index = 0; Index < Run->GetPersistentAuthoredCards().Num(); ++Index)
+		{
+			const FCardData& Card = Run->GetPersistentAuthoredCards()[Index];
+			AddDeleteRow(MakeCardContentFromData(Box, Card, false, 0.78f), TEXT("authored_delete_card"), Index);
+		}
+	}
+	if (Run->GetPersistentAuthoredRelics().Num() > 0)
+	{
+		AddToVBox(Box, Style::MakeText(Box, TEXT("原创法宝与伙伴"), 25, Style::PaperWhite()), FMargin(80.f, 18.f, 80.f, 4.f));
+		for (int32 Index = 0; Index < Run->GetPersistentAuthoredRelics().Num(); ++Index)
+		{
+			const FRelicData& Relic = Run->GetPersistentAuthoredRelics()[Index];
+			AddDeleteRow(MakeRelicCardContentFromData(Box, Relic, 0.88f), TEXT("authored_delete_relic"), Index);
+		}
+	}
+	if (Run->GetPersistentAuthoredCards().Num() + Run->GetPersistentAuthoredRelics().Num() == 0)
+	{
+		UTextBlock* Empty = Style::MakeText(Box, TEXT("尚未登记原创内容。"), 20, Style::DimGray());
+		Empty->SetJustification(ETextJustify::Center);
+		AddToVBox(Box, Empty, FMargin(40.f, 40.f));
+	}
+	AddToVBox(Box, MakeLinkedButton(Box, TEXT("【 返回标题 】"), TEXT("authored_library_back"), 0, 19), FMargin(260.f, 24.f));
+	Pad(Box, 35.f);
+	SetScreen(Scroll, EGameScreen::AuthoredLibrary);
 }
 
 // -----------------------------------------------------------
@@ -163,7 +244,11 @@ void AAscendPlayerController::ShowStartRelicChoice()
 		Pad(CardBox, 4);
 
 		UWidget* RelicFace = MakeRelicCardContentFromData(CardBox, *RD, 1.0f);
-		CardBox->AddChild(RelicFace);
+		if (UVerticalBoxSlot* RelicSlot = CardBox->AddChildToVerticalBox(RelicFace))
+		{
+			RelicSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Center);
+			RelicSlot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
+		}
 		Pad(CardBox, 6);
 
 		UButton* Btn = Style::MakeStyledButton(CardBox, TEXT("【选择】"), 16, RarityColor(RD->Rarity),
@@ -173,7 +258,7 @@ void AAscendPlayerController::ShowStartRelicChoice()
 		CP->Index = i;
 		CP->Owner = this;
 		Btn->OnClicked.AddDynamic(CP, &UClickProxy::HandleClick);
-		Proxies.Add(CP);
+		PendingScreenProxies.Add(CP);
 		AddToVBox(CardBox, Btn, FMargin(0.f));
 
 		USizeBox* CardSize = NewObject<USizeBox>(Box);
@@ -342,14 +427,83 @@ void AAscendPlayerController::RefreshCombatPanel()
 	// 右侧战斗内容
 	UVerticalBox* RightBox = NewObject<UVerticalBox>(Box);
 
-	// ---- 顶栏：回合数（左） + 日志折叠按钮（右） ----
-	UHorizontalBox* TopRow = NewObject<UHorizontalBox>(RightBox);
-	AddToHBox(TopRow, Style::MakeText(TopRow,
-		FString::Printf(TEXT("第 %d 回合"), Combat->TurnCount), 15, Style::GoldYellow()));
-	TopRow->AddChildToHorizontalBox(NewObject<USpacer>(RightBox))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+	// ---- 顶栏：中央立体回合牌匾 + 右侧日志 ----
+	USizeBox* TopHudSize = NewObject<USizeBox>(RightBox);
+	TopHudSize->SetHeightOverride(80.f);
+	UOverlay* TopHud = NewObject<UOverlay>(TopHudSize);
+	USizeBox* TurnSize = NewObject<USizeBox>(TopHud);
+	TurnSize->SetWidthOverride(304.f);
+	TurnSize->SetHeightOverride(68.f);
+	UOverlay* TurnVisual = NewObject<UOverlay>(TurnSize);
+	if (UImage* TurnFrame = FAscendArt::MakeImage(TurnVisual, TEXT("Art/ui/hud_turn_plaque.png")))
+	{
+		TurnFrame->SetVisibility(ESlateVisibility::HitTestInvisible);
+		UOverlaySlot* TurnFrameSlot = TurnVisual->AddChildToOverlay(TurnFrame);
+		TurnFrameSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+		TurnFrameSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+	}
+	UScaleBox* TurnTextScale = NewObject<UScaleBox>(TurnVisual);
+	TurnTextScale->SetStretch(EStretch::ScaleToFit);
+	TurnTextScale->SetStretchDirection(EStretchDirection::DownOnly);
+	UTextBlock* TurnText = Style::MakeText(TurnTextScale,
+		FString::Printf(TEXT("第 %d 回合"), Combat->TurnCount), 22, Style::GoldYellow());
+	TurnText->SetJustification(ETextJustify::Center);
+	TurnText->SetShadowOffset(FVector2D(1.f, 1.f));
+	TurnTextScale->SetContent(TurnText);
+	UOverlaySlot* TurnTextSlot = TurnVisual->AddChildToOverlay(TurnTextScale);
+	TurnTextSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+	TurnTextSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+	TurnTextSlot->SetPadding(FMargin(68.f, 15.f, 68.f, 16.f));
+	TurnSize->SetContent(TurnVisual);
+	UOverlaySlot* TurnSlot = TopHud->AddChildToOverlay(TurnSize);
+	TurnSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Center);
+	TurnSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Top);
+	TurnSlot->SetPadding(FMargin(0.f, 6.f, 0.f, 0.f));
+
 	const FString LogLabel = bLogExpanded ? FString(TEXT("日志 ▼")) : FString::Printf(TEXT("日志 ▶ %d"), CombatLogLines.Num());
-	AddToHBox(TopRow, MakeLinkedButton(TopRow, LogLabel, TEXT("toggle_log"), 0, 12));
-	AddToVBox(RightBox, TopRow, FMargin(0.f, 0.f));
+	UButton* LogButton = MakeLinkedButton(TopHud, LogLabel, TEXT("toggle_log"), 0, 12);
+	USizeBox* LogSize = NewObject<USizeBox>(TopHud);
+	LogSize->SetWidthOverride(132.f);
+	LogSize->SetHeightOverride(42.f);
+	LogSize->SetContent(LogButton);
+	UOverlaySlot* LogSlot = TopHud->AddChildToOverlay(LogSize);
+	LogSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Right);
+	LogSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Top);
+	LogSlot->SetPadding(FMargin(0.f, 10.f, 18.f, 0.f));
+	TopHudSize->SetContent(TopHud);
+	AddToVBox(RightBox, TopHudSize, FMargin(0.f));
+
+	if (Combat->PendingDiscoverChoices.Num() > 0)
+	{
+		UBorder* DiscoverPanel = NewObject<UBorder>(RightBox);
+		DiscoverPanel->SetBrushColor(FLinearColor(0.08f, 0.16f, 0.19f, 0.97f));
+		DiscoverPanel->SetPadding(FMargin(18.f, 10.f));
+		UVerticalBox* DiscoverBox = NewObject<UVerticalBox>(DiscoverPanel);
+		UTextBlock* DiscoverTitle = Style::MakeText(DiscoverBox,
+			TEXT("地图指引 · 从随机候选中选择一张加入手牌"), 20, Style::GoldYellow());
+		DiscoverTitle->SetJustification(ETextJustify::Center);
+		AddToVBox(DiscoverBox, DiscoverTitle, FMargin(0.f, 0.f, 0.f, 8.f));
+		UHorizontalBox* DiscoverRow = NewObject<UHorizontalBox>(DiscoverBox);
+		DiscoverRow->AddChildToHorizontalBox(NewObject<USpacer>(DiscoverRow))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		for (int32 ChoiceIndex = 0; ChoiceIndex < Combat->PendingDiscoverChoices.Num(); ++ChoiceIndex)
+		{
+			const FCardInstance& Candidate = Combat->PendingDiscoverChoices[ChoiceIndex];
+			UButton* ChoiceButton = NewObject<UButton>(DiscoverRow);
+			ChoiceButton->SetBackgroundColor(FLinearColor::Transparent);
+			ChoiceButton->SetContent(MakeCardContentFromData(ChoiceButton, Candidate.Data, Candidate.bUpgraded, 0.82f));
+			UClickProxy* Proxy = NewObject<UClickProxy>(ChoiceButton);
+			Proxy->Tag = TEXT("discover_choice");
+			Proxy->Index = ChoiceIndex;
+			Proxy->Owner = this;
+			ChoiceButton->OnClicked.AddDynamic(Proxy, &UClickProxy::HandleClick);
+			PendingScreenProxies.Add(Proxy);
+			AddToHBox(DiscoverRow, ChoiceButton, FMargin(8.f, 2.f));
+		}
+		DiscoverRow->AddChildToHorizontalBox(NewObject<USpacer>(DiscoverRow))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		AddToVBox(DiscoverBox, DiscoverRow);
+		DiscoverPanel->SetContent(DiscoverBox);
+		AddToVBox(RightBox, DiscoverPanel, FMargin(20.f, 6.f));
+	}
 
 	// ---- 敌人区（卡面，可点击锁定） ----
 	UHorizontalBox* EnemyRow = NewObject<UHorizontalBox>(RightBox);
@@ -373,7 +527,7 @@ void AAscendPlayerController::RefreshCombatPanel()
 			Proxy->Index = i;
 			Proxy->Owner = this;
 			EBtn->OnClicked.AddDynamic(Proxy, &UClickProxy::HandleClick);
-			Proxies.Add(Proxy);
+			PendingScreenProxies.Add(Proxy);
 			AddToHBox(EnemyRow, EBtn, FMargin(8.f, 0.f));
 		}
 		else
@@ -399,9 +553,9 @@ void AAscendPlayerController::RefreshCombatPanel()
 			LogScroll->AddChild(MakeLogText(CombatLogLines[i], Style::PaperWhite()));
 		}
 		LogBorder->SetContent(LogScroll);
-		UVerticalBoxSlot* LogSlot = RightBox->AddChildToVerticalBox(LogBorder);
-		LogSlot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
-		LogSlot->SetPadding(FMargin(40.f, 2.f));
+		UVerticalBoxSlot* ExpandedLogSlot = RightBox->AddChildToVerticalBox(LogBorder);
+		ExpandedLogSlot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
+		ExpandedLogSlot->SetPadding(FMargin(40.f, 2.f));
 		LogScroll->ScrollToEnd();
 	}
 
@@ -424,19 +578,22 @@ void AAscendPlayerController::RefreshCombatPanel()
 		AddToVBox(RightBox, PowerRow, FMargin(0.f, 2.f));
 	}
 
-	// ---- 丹药 + 结束回合 ----
-	UHorizontalBox* ActionRow = NewObject<UHorizontalBox>(RightBox);
-	ActionRow->AddChildToHorizontalBox(NewObject<USpacer>(RightBox))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-
-	for (int32 i = 0; i < Run->State.PillIds.Num(); ++i)
+	// 丹药仍放在内容流中；结束回合改为独立 HUD 浮层，避免挤压战场。
+	if (Run->State.PillIds.Num() > 0)
 	{
-		AddToHBox(ActionRow, MakeLinkedButton(ActionRow,
-			FString::Printf(TEXT("丹:%s"), *Run->State.PillIds[i]), TEXT("pill"), i, 14));
+		UHorizontalBox* ActionRow = NewObject<UHorizontalBox>(RightBox);
+		ActionRow->AddChildToHorizontalBox(NewObject<USpacer>(RightBox))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		for (int32 i = 0; i < Run->State.PillIds.Num(); ++i)
+		{
+			UButton* PillButton = MakeLinkedButton(ActionRow,
+				FString::Printf(TEXT("丹:%s"), *Run->State.PillIds[i]), TEXT("pill"), i, 14);
+			if (Combat->bPlayerTurnSkipped) PillButton->SetIsEnabled(false);
+			AddToHBox(ActionRow, PillButton);
+		}
+		UVerticalBoxSlot* ActionSlot = RightBox->AddChildToVerticalBox(ActionRow);
+		ActionSlot->SetPadding(FMargin(0.f, 4.f, 28.f, 4.f));
+		ActionSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
 	}
-
-	AddToHBox(ActionRow, MakeLinkedButton(ActionRow, TEXT("【结束回合】"), TEXT("endturn"), 0, 20));
-	ActionRow->AddChildToHorizontalBox(NewObject<USpacer>(RightBox))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-	AddToVBox(RightBox, ActionRow);
 
 	// ---- Fill spacer pushes bottom area to bottom ----
 	{
@@ -448,62 +605,68 @@ void AAscendPlayerController::RefreshCombatPanel()
 		FSlot->SetPadding(FMargin(0.f));
 	}
 
-	// ---- 底部栏：左 头像+气血 | 右 牌堆按钮 ----
+	// ---- 底部栏：左 头像+气血 | 右 立体牌堆 ----
 	UHorizontalBox* BottomRow = NewObject<UHorizontalBox>(RightBox);
 
-	// 左下：主角头像 + 气血
+	// 左下：固定坐标头像 HUD。美术框、椭圆头像、气血条和数字共用同一坐标契约，
+	// 不再依靠 Overlay Padding 反推大小，避免头像方角或拉伸穿出圆孔。
 	{
 		USizeBox* HPCluster = NewObject<USizeBox>(BottomRow);
-		HPCluster->SetWidthOverride(400.f);
-		UHorizontalBox* HPBox = NewObject<UHorizontalBox>(HPCluster);
+		HPCluster->SetWidthOverride(430.f);
+		HPCluster->SetHeightOverride(134.f);
+		UCanvasPanel* HPVisual = NewObject<UCanvasPanel>(HPCluster);
+
+		if (UImage* AvatarImg = FAscendArt::MakeImage(HPVisual, TEXT("Art/avatar/player_cultivator_v2_hud.png")))
 		{
-			if (UImage* AvatarImg = FAscendArt::MakeImage(HPBox, TEXT("Art/avatar/sword_cultivator.png")))
+			AvatarImg->SetVisibility(ESlateVisibility::HitTestInvisible);
+			if (UCanvasPanelSlot* AvatarSlot = HPVisual->AddChildToCanvas(AvatarImg))
 			{
-				UBorder* AvatarFrame = NewObject<UBorder>(HPBox);
-				AvatarFrame->SetBrushColor(FLinearColor(0.45f, 0.35f, 0.16f));
-				AvatarFrame->SetPadding(FMargin(3.f));
-				USizeBox* AvatarSize = NewObject<USizeBox>(AvatarFrame);
-				AvatarSize->SetWidthOverride(96.f);
-				AvatarSize->SetHeightOverride(96.f);
-				UScaleBox* AvatarScale = NewObject<UScaleBox>(AvatarSize);
-				AvatarScale->SetStretch(EStretch::ScaleToFill);
-				AvatarScale->SetContent(AvatarImg);
-				AvatarSize->SetContent(AvatarScale);
-				AvatarFrame->SetContent(AvatarSize);
-				HPBox->AddChildToHorizontalBox(AvatarFrame)->SetPadding(FMargin(0.f, 0.f, 8.f, 0.f));
+				// hud_hp_panel 的透明内窗在原图 (58,38)-(317,218)，
+				// 按 430x134 等比换算后正好是下面这块 109x75 椭圆区域。
+				AvatarSlot->SetPosition(FVector2D(24.f, 16.f));
+				AvatarSlot->SetSize(FVector2D(109.f, 75.f));
+				AvatarSlot->SetZOrder(0);
 			}
-
-			UVerticalBox* HPVBox = NewObject<UVerticalBox>(HPBox);
-			{
-				UHorizontalBox* HPTopRow = NewObject<UHorizontalBox>(HPVBox);
-				UBorder* MingBadge = NewObject<UBorder>(HPTopRow);
-				MingBadge->SetBrushColor(FLinearColor(0.55f, 0.15f, 0.12f));
-				MingBadge->SetPadding(FMargin(8.f, 2.f));
-				UTextBlock* MingT = Style::MakeText(MingBadge, TEXT("命"), 20, Style::PaperWhite());
-				MingBadge->SetContent(MingT);
-				HPTopRow->AddChildToHorizontalBox(MingBadge);
-
-				UTextBlock* HPT = Style::MakeText(HPTopRow,
-					FString::Printf(TEXT("%d/%d"), Combat->Player.HP, Combat->Player.MaxHP), 18, Style::PaperWhite());
-				HPTopRow->AddChildToHorizontalBox(HPT)->SetPadding(FMargin(10.f, 2.f, 0.f, 0.f));
-
-				HPVBox->AddChildToVerticalBox(HPTopRow)->SetPadding(FMargin(0.f, 4.f, 0.f, 0.f));
-
-				USizeBox* HPBarSize = NewObject<USizeBox>(HPVBox);
-				HPBarSize->SetWidthOverride(240.f);
-				HPBarSize->SetHeightOverride(24.f);
-				UBorder* HPBg = NewObject<UBorder>(HPBarSize);
-				HPBg->SetBrushColor(FLinearColor(0.16f, 0.10f, 0.10f));
-				UProgressBar* PHPBar = NewObject<UProgressBar>(HPBg);
-				PHPBar->SetPercent(Combat->Player.MaxHP > 0 ? (float)Combat->Player.HP / Combat->Player.MaxHP : 0.f);
-				PHPBar->SetFillColorAndOpacity(FLinearColor(0.68f, 0.20f, 0.16f));
-				HPBg->SetContent(PHPBar);
-				HPBarSize->SetContent(HPBg);
-				HPVBox->AddChildToVerticalBox(HPBarSize)->SetPadding(FMargin(8.f, 4.f, 0.f, 0.f));
-			}
-			HPBox->AddChildToHorizontalBox(HPVBox);
 		}
-		HPCluster->SetContent(HPBox);
+
+		if (UImage* HPFrame = FAscendArt::MakeImage(HPVisual, TEXT("Art/ui/hud_hp_panel.png")))
+		{
+			HPFrame->SetVisibility(ESlateVisibility::HitTestInvisible);
+			if (UCanvasPanelSlot* FrameSlot = HPVisual->AddChildToCanvas(HPFrame))
+			{
+				FrameSlot->SetPosition(FVector2D::ZeroVector);
+				FrameSlot->SetSize(FVector2D(430.f, 134.f));
+				FrameSlot->SetZOrder(10);
+			}
+		}
+
+		// 覆盖美术稿中的示意红条，显示真实气血百分比。
+		UBorder* HPBarBg = NewObject<UBorder>(HPVisual);
+		HPBarBg->SetBrushColor(FLinearColor(0.055f, 0.045f, 0.04f, 1.f));
+		HPBarBg->SetPadding(FMargin(2.f));
+		UProgressBar* HPBar = NewObject<UProgressBar>(HPBarBg);
+		HPBar->SetPercent(Combat->Player.MaxHP > 0 ? (float)Combat->Player.HP / Combat->Player.MaxHP : 0.f);
+		HPBar->SetFillColorAndOpacity(FLinearColor(0.76f, 0.19f, 0.14f));
+		HPBarBg->SetContent(HPBar);
+		if (UCanvasPanelSlot* BarSlot = HPVisual->AddChildToCanvas(HPBarBg))
+		{
+			BarSlot->SetPosition(FVector2D(162.f, 82.f));
+			BarSlot->SetSize(FVector2D(220.f, 19.f));
+			BarSlot->SetZOrder(20);
+		}
+
+		UTextBlock* HPText = Style::MakeText(HPVisual,
+			FString::Printf(TEXT("%d / %d"), Combat->Player.HP, Combat->Player.MaxHP), 24, Style::PaperWhite());
+		HPText->SetJustification(ETextJustify::Center);
+		HPText->SetShadowOffset(FVector2D(1.f, 1.f));
+		if (UCanvasPanelSlot* TextSlot = HPVisual->AddChildToCanvas(HPText))
+		{
+			TextSlot->SetPosition(FVector2D(158.f, 32.f));
+			TextSlot->SetSize(FVector2D(234.f, 40.f));
+			TextSlot->SetZOrder(20);
+		}
+
+		HPCluster->SetContent(HPVisual);
 		AddToHBox(BottomRow, HPCluster, FMargin(0.f, 0.f, 12.f, 0.f));
 	}
 
@@ -513,48 +676,50 @@ void AAscendPlayerController::RefreshCombatPanel()
 	// 牌堆/弃牌堆（右下，以堆叠卡片展示）
 	{
 		USizeBox* PileCluster = NewObject<USizeBox>(BottomRow);
-		PileCluster->SetWidthOverride(160.f);
+		PileCluster->SetWidthOverride(204.f);
+		PileCluster->SetHeightOverride(132.f);
 		UHorizontalBox* PileRow = NewObject<UHorizontalBox>(PileCluster);
 
-		const float PileCardW = 60.f;
-		const float PileCardH = 84.f;
-		const float StackOffset = 2.f;
-		const int32 MaxStackCards = 5;
+		const float PileCardW = 78.f;
+		const float PileCardH = 104.f;
+		const float StackOffset = 3.f;
+		const int32 MaxStackCards = 4;
+
+		auto AddPileBack = [&](UOverlay* Target, const FString& ArtPath, int32 Count)
+		{
+			const int32 ShowN = FMath::Clamp(Count, 1, MaxStackCards);
+			for (int32 si = ShowN - 1; si >= 0; --si)
+			{
+				USizeBox* CardSize = NewObject<USizeBox>(Target);
+				CardSize->SetWidthOverride(PileCardW);
+				CardSize->SetHeightOverride(PileCardH);
+				if (UImage* Back = FAscendArt::MakeImage(CardSize, ArtPath))
+				{
+					Back->SetVisibility(ESlateVisibility::HitTestInvisible);
+					CardSize->SetContent(Back);
+				}
+				UOverlaySlot* CardSlot = Target->AddChildToOverlay(CardSize);
+				CardSlot->SetPadding(FMargin(StackOffset * si, 0.f, 0.f, StackOffset * si));
+				CardSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Left);
+				CardSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Bottom);
+			}
+		};
 
 		// --- 牌堆（背面朝上堆叠） ---
 		{
 			UButton* DrawBtn = NewObject<UButton>(PileRow);
 			DrawBtn->SetBackgroundColor(FLinearColor::Transparent);
 			UOverlay* DrawOvl = NewObject<UOverlay>(DrawBtn);
-
-			const int32 N = FMath::Min(Combat->DrawPile.Num(), MaxStackCards);
-			for (int32 si = 0; si < N; ++si)
-			{
-				UBorder* CardBack = NewObject<UBorder>(DrawOvl);
-				CardBack->SetBrushColor(FLinearColor(0.25f, 0.15f, 0.10f));
-				CardBack->SetPadding(FMargin(2.f));
-				FString ShortN = TEXT("牌");
-				UTextBlock* CT = Style::MakeText(CardBack, ShortN, 10, Style::DimGray());
-				CT->SetJustification(ETextJustify::Center);
-				CardBack->SetContent(CT);
-				USizeBox* CSize = NewObject<USizeBox>(CardBack);
-				CSize->SetWidthOverride(PileCardW);
-				CSize->SetHeightOverride(PileCardH);
-				CardBack->SetContent(CSize);
-
-				UOverlaySlot* OSlot = DrawOvl->AddChildToOverlay(CardBack);
-				OSlot->SetPadding(FMargin(StackOffset * si, -(StackOffset * si)));
-				OSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Left);
-				OSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Top);
-			}
+			AddPileBack(DrawOvl, TEXT("Art/ui/deck_back.png"), Combat->DrawPile.Num());
 
 			// 数量文字
 			UTextBlock* CountT = Style::MakeText(DrawOvl,
-				FString::Printf(TEXT("%d"), Combat->DrawPile.Num()), 14, Style::GoldYellow());
-			CountT->SetJustification(ETextJustify::Right);
+				FString::Printf(TEXT("%d"), Combat->DrawPile.Num()), 20, Style::GoldYellow());
+			CountT->SetJustification(ETextJustify::Center);
+			CountT->SetShadowOffset(FVector2D(1.f, 1.f));
 			UOverlaySlot* CSlot = DrawOvl->AddChildToOverlay(CountT);
-			CSlot->SetPadding(FMargin(0.f, 0.f, 4.f, 2.f));
-			CSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Right);
+			CSlot->SetPadding(FMargin(0.f, 0.f, 8.f, 3.f));
+			CSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
 			CSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Bottom);
 
 			DrawBtn->SetContent(DrawOvl);
@@ -564,58 +729,29 @@ void AAscendPlayerController::RefreshCombatPanel()
 			DP->Index = 0;
 			DP->Owner = this;
 			DrawBtn->OnClicked.AddDynamic(DP, &UClickProxy::HandleClick);
-			Proxies.Add(DP);
+			PendingScreenProxies.Add(DP);
 
-			PileRow->AddChildToHorizontalBox(DrawBtn)->SetPadding(FMargin(0.f, 0.f, 8.f, 0.f));
+			UHorizontalBoxSlot* DrawSlot = PileRow->AddChildToHorizontalBox(DrawBtn);
+			DrawSlot->SetPadding(FMargin(0.f, 0.f, 12.f, 0.f));
+			DrawSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
 		}
 
-		// --- 弃牌堆（正面朝上堆叠，顶牌可见） ---
+		// --- 弃牌堆（专用赤色牌背，和抽牌堆一眼可区分） ---
 		{
 			UButton* DiscardBtn = NewObject<UButton>(PileRow);
 			DiscardBtn->SetBackgroundColor(FLinearColor::Transparent);
 			UOverlay* DiscardOvl = NewObject<UOverlay>(DiscardBtn);
 
 			const int32 N = Combat->DiscardPile.Num();
-			const int32 ShowN = FMath::Min(N, MaxStackCards);
-			for (int32 si = 0; si < ShowN; ++si)
-			{
-				// 取倒数第 si 张（从顶到底）
-				const int32 CardIdx = N - 1 - si;
-				if (!Combat->DiscardPile.IsValidIndex(CardIdx)) break;
-				const FCardData* CD = Run->GetCardData(Combat->DiscardPile[CardIdx].Data.Id);
-				if (!CD) continue;
-
-				UBorder* CardFace = NewObject<UBorder>(DiscardOvl);
-				CardFace->SetBrushColor(FAscendUIStyle::CardTypeColor(CD->Type) * 0.5f + FLinearColor(0.15f, 0.12f, 0.10f) * 0.5f);
-				CardFace->SetPadding(FMargin(2.f));
-
-				UVerticalBox* CVBox = NewObject<UVerticalBox>(CardFace);
-				UTextBlock* CN = Style::MakeText(CVBox, CD->Name, 9, Style::PaperWhite());
-				CN->SetJustification(ETextJustify::Center);
-				CVBox->AddChildToVerticalBox(CN)->SetPadding(FMargin(1.f, 0.f));
-				UTextBlock* CCost = Style::MakeText(CVBox,
-					FString::FromInt(CD->Cost), 10, Style::SpiritBlue());
-				CCost->SetJustification(ETextJustify::Center);
-				CVBox->AddChildToVerticalBox(CCost);
-
-				CardFace->SetContent(CVBox);
-				USizeBox* CSize = NewObject<USizeBox>(CardFace);
-				CSize->SetWidthOverride(PileCardW);
-				CSize->SetHeightOverride(PileCardH);
-				CardFace->SetContent(CSize);
-
-				UOverlaySlot* OSlot = DiscardOvl->AddChildToOverlay(CardFace);
-				OSlot->SetPadding(FMargin(StackOffset * si, -(StackOffset * si)));
-				OSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Left);
-				OSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Top);
-			}
+			AddPileBack(DiscardOvl, TEXT("Art/ui/discard_back.png"), N);
 
 			UTextBlock* CountT = Style::MakeText(DiscardOvl,
-				FString::Printf(TEXT("%d"), N), 14, Style::PaperWhite());
-			CountT->SetJustification(ETextJustify::Right);
+				FString::Printf(TEXT("%d"), N), 20, Style::GoldYellow());
+			CountT->SetJustification(ETextJustify::Center);
+			CountT->SetShadowOffset(FVector2D(1.f, 1.f));
 			UOverlaySlot* CSlot = DiscardOvl->AddChildToOverlay(CountT);
-			CSlot->SetPadding(FMargin(0.f, 0.f, 4.f, 2.f));
-			CSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Right);
+			CSlot->SetPadding(FMargin(0.f, 0.f, 8.f, 3.f));
+			CSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
 			CSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Bottom);
 
 			DiscardBtn->SetContent(DiscardOvl);
@@ -625,9 +761,10 @@ void AAscendPlayerController::RefreshCombatPanel()
 			DP->Index = 0;
 			DP->Owner = this;
 			DiscardBtn->OnClicked.AddDynamic(DP, &UClickProxy::HandleClick);
-			Proxies.Add(DP);
+			PendingScreenProxies.Add(DP);
 
-			PileRow->AddChildToHorizontalBox(DiscardBtn);
+			UHorizontalBoxSlot* DiscardSlot = PileRow->AddChildToHorizontalBox(DiscardBtn);
+			DiscardSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
 		}
 
 		PileCluster->SetContent(PileRow);
@@ -638,13 +775,6 @@ void AAscendPlayerController::RefreshCombatPanel()
 
 	// 右侧面板接入主布局
 	MainHBox->AddChildToHorizontalBox(RightBox)->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-
-	// ---- 回合中抽卡动画（牌效果触发）：每抽一张播一次 ----
-	if (Combat->PendingDrawCount > 0 && Combat->TurnCount == LastSeenTurnCount)
-	{
-		PlayHandEntranceAnimation(Combat->PendingDrawCount);
-		Combat->PendingDrawCount = 0;
-	}
 
 	// ---- 屏幕根：Overlay（底层主内容 + 牌堆检视浮层） ----
 	UOverlay* ScreenOvl = NewObject<UOverlay>(RootWidget);
@@ -660,10 +790,28 @@ void AAscendPlayerController::RefreshCombatPanel()
 
 	// ---- 灵力+罡气+状态（置于手牌区上方，居中） ----
 	{
-		FIntPoint VPS(1280, 720);
-		if (GetWorld() && GetWorld()->GetGameViewport())
-			VPS = GetWorld()->GetGameViewport()->Viewport->GetSizeXY();
-		const float Vw = VPS.X, Vh = VPS.Y;
+		// UMG Canvas 的 Slot 坐标是 Slate 局部坐标，不一定等于窗口像素。
+		// Retina 窗口下常见的是 1922x1081 local / 1280x720 absolute；
+		// 直接拿 Viewport 像素摆牌会把整副牌压到左上区域。
+		FVector2D CanvasSize(1920.f, 1080.f);
+		if (AnimCanvas)
+		{
+			const FVector2D Measured = AnimCanvas->GetTickSpaceGeometry().GetLocalSize();
+			if (Measured.X >= 640.f && Measured.Y >= 360.f)
+				CanvasSize = Measured;
+		}
+		const float Vw = CanvasSize.X, Vh = CanvasSize.Y;
+		CurrentHandCardScale = GetResponsiveHandScale(CanvasSize);
+		const bool bCompactHand = CurrentHandCardScale < 0.99f;
+		const float CardH = AscendCardLayout::Height * CurrentHandCardScale;
+		const float HandBottomMargin = bCompactHand
+			? AscendCardLayout::CompactHandBottomMargin : AscendCardLayout::HandBottomMargin;
+		const float CardY = Vh - CardH - HandBottomMargin;
+		const float SpiritH = 72.f;
+		const float StatusRowH = 44.f;
+		const float HandInfoGap = 8.f;
+		const float SpiritY = CardY - SpiritH - HandInfoGap;
+		const float StatusY = SpiritY - StatusRowH - 4.f;
 
 		UCanvasPanel* InfoLayer = NewObject<UCanvasPanel>(ScreenOvl);
 		UOverlaySlot* InfoSlot = ScreenOvl->AddChildToOverlay(InfoLayer);
@@ -684,7 +832,7 @@ void AAscendPlayerController::RefreshCombatPanel()
 			StatusWrap->SetContent(StatusCenter);
 			if (UCanvasPanelSlot* SSlot = InfoLayer->AddChildToCanvas(StatusWrap))
 			{
-				SSlot->SetPosition(FVector2D(0.f, Vh * 1.5f - Vh * 0.35f - 194.f - 80.f - 44.f));
+				SSlot->SetPosition(FVector2D(0.f, StatusY));
 				SSlot->SetSize(FVector2D(Vw, 44.f));
 				SSlot->SetZOrder(101);
 			}
@@ -694,23 +842,58 @@ void AAscendPlayerController::RefreshCombatPanel()
 		UHorizontalBox* SpiritRow = NewObject<UHorizontalBox>(InfoLayer);
 		SpiritRow->AddChildToHorizontalBox(NewObject<USpacer>(InfoLayer))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
 
-		UBorder* BlockBadge = NewObject<UBorder>(SpiritRow);
-		BlockBadge->SetBrushColor(FLinearColor(0.20f, 0.38f, 0.58f));
-		BlockBadge->SetPadding(FMargin(16.f, 4.f));
-		UTextBlock* BlockT = Style::MakeText(BlockBadge,
-			FString::Printf(TEXT("罡气 %d"), Combat->Player.Block), 32, Style::PaperWhite());
-		BlockBadge->SetContent(BlockT);
-		UHorizontalBoxSlot* BSlot = SpiritRow->AddChildToHorizontalBox(BlockBadge);
-		BSlot->SetPadding(FMargin(0.f, 0.f, 24.f, 0.f));
+		// 罡气与灵气共享一个立体外框，但内部仍是两个明确分区。
+		const int32 VisibleSpiritSlots = FMath::Max(Combat->MaxSpirit, Combat->Spirit);
+		USizeBox* ResourceSize = NewObject<USizeBox>(SpiritRow);
+		ResourceSize->SetWidthOverride(720.f);
+		ResourceSize->SetHeightOverride(66.f);
+		UOverlay* ResourceVisual = NewObject<UOverlay>(ResourceSize);
+		if (UImage* ResourceFrame = FAscendArt::MakeImage(ResourceVisual, TEXT("Art/ui/resource_panel.png")))
+		{
+			ResourceFrame->SetVisibility(ESlateVisibility::HitTestInvisible);
+			UOverlaySlot* FrameSlot = ResourceVisual->AddChildToOverlay(ResourceFrame);
+			FrameSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+			FrameSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+		}
+		UHorizontalBox* ResourceContent = NewObject<UHorizontalBox>(ResourceVisual);
+		USizeBox* BlockArea = NewObject<USizeBox>(ResourceContent);
+		BlockArea->SetWidthOverride(285.f);
+		UTextBlock* BlockT = Style::MakeText(BlockArea,
+			FString::Printf(TEXT("罡气  %d"), Combat->Player.Block), 28, Style::PaperWhite());
+		BlockT->SetJustification(ETextJustify::Center);
+		BlockT->SetShadowOffset(FVector2D(1.f, 1.f));
+		BlockArea->SetContent(BlockT);
+		UHorizontalBoxSlot* BlockAreaSlot = ResourceContent->AddChildToHorizontalBox(BlockArea);
+		BlockAreaSlot->SetPadding(FMargin(72.f, 8.f, 0.f, 0.f));
 
-		FString Gems;
-		for (int32 gi = 0; gi < Combat->MaxSpirit; ++gi)
-			Gems += (gi < Combat->Spirit) ? TEXT("◆") : TEXT("◇");
-		if (Combat->Spirit > Combat->MaxSpirit)
-			Gems += FString::Printf(TEXT(" +%d"), Combat->Spirit - Combat->MaxSpirit);
-		UTextBlock* GemT = Style::MakeText(SpiritRow, Gems, 40, Style::SpiritBlue());
-		UHorizontalBoxSlot* GSlot = SpiritRow->AddChildToHorizontalBox(GemT);
-		GSlot->SetPadding(FMargin(0.f, 0.f, 24.f, 0.f));
+		UHorizontalBox* SpiritContent = NewObject<UHorizontalBox>(ResourceContent);
+		UTextBlock* SpiritLabel = Style::MakeText(SpiritContent, TEXT("灵气"), 26, Style::PaperWhite());
+		UHorizontalBoxSlot* LabelSlot = SpiritContent->AddChildToHorizontalBox(SpiritLabel);
+		LabelSlot->SetPadding(FMargin(18.f, 10.f, 8.f, 0.f));
+		UHorizontalBox* GemRow = NewObject<UHorizontalBox>(SpiritContent);
+		const float GemSize = VisibleSpiritSlots <= 8 ? 34.f : (VisibleSpiritSlots <= 12 ? 27.f : 21.f);
+		for (int32 gi = 0; gi < VisibleSpiritSlots; ++gi)
+		{
+			USizeBox* GemSlotSize = NewObject<USizeBox>(GemRow);
+			GemSlotSize->SetWidthOverride(GemSize);
+			GemSlotSize->SetHeightOverride(GemSize);
+			if (UImage* Gem = FAscendArt::MakeImage(GemSlotSize, TEXT("Art/ui/spirit_gem.png")))
+			{
+				Gem->SetVisibility(ESlateVisibility::HitTestInvisible);
+				Gem->SetRenderOpacity(gi < Combat->Spirit ? 1.f : 0.20f);
+				GemSlotSize->SetContent(Gem);
+			}
+			UHorizontalBoxSlot* GemSlot = GemRow->AddChildToHorizontalBox(GemSlotSize);
+			GemSlot->SetPadding(FMargin(1.f, 9.f, 1.f, 0.f));
+		}
+		SpiritContent->AddChildToHorizontalBox(GemRow);
+		UHorizontalBoxSlot* SpiritAreaSlot = ResourceContent->AddChildToHorizontalBox(SpiritContent);
+		SpiritAreaSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		UOverlaySlot* ContentSlot = ResourceVisual->AddChildToOverlay(ResourceContent);
+		ContentSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+		ContentSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+		ResourceSize->SetContent(ResourceVisual);
+		SpiritRow->AddChildToHorizontalBox(ResourceSize);
 
 		if (Combat->Toxicity > 0)
 		{
@@ -724,25 +907,32 @@ void AAscendPlayerController::RefreshCombatPanel()
 
 		USizeBox* SpiritWrap = NewObject<USizeBox>(InfoLayer);
 		SpiritWrap->SetWidthOverride(Vw);
-		SpiritWrap->SetHeightOverride(50.f);
+		SpiritWrap->SetHeightOverride(72.f);
 		SpiritWrap->SetContent(SpiritRow);
 
 		if (UCanvasPanelSlot* ISlot = InfoLayer->AddChildToCanvas(SpiritWrap))
 		{
-			ISlot->SetPosition(FVector2D(0.f, Vh * 1.5f - Vh * 0.35f - 194.f - 80.f));
-			ISlot->SetSize(FVector2D(Vw, 50.f));
+			ISlot->SetPosition(FVector2D(0.f, SpiritY));
+			ISlot->SetSize(FVector2D(Vw, 72.f));
 			ISlot->SetZOrder(100);
 		}
 	}
 
 	// ---- 手牌：叠加在屏幕底部（根据视口尺寸计算坐标） ----
+	HideCardPreview();
 	HandCardButtons.Empty();
 	{
-		FIntPoint ViewportSize(1280, 720);
-		if (GetWorld() && GetWorld()->GetGameViewport())
-			ViewportSize = GetWorld()->GetGameViewport()->Viewport->GetSizeXY();
-		const float ViewW = ViewportSize.X;
-		const float ViewH = ViewportSize.Y;
+		FVector2D CanvasSize(1920.f, 1080.f);
+		if (AnimCanvas)
+		{
+			const FVector2D Measured = AnimCanvas->GetTickSpaceGeometry().GetLocalSize();
+			if (Measured.X >= 640.f && Measured.Y >= 360.f)
+				CanvasSize = Measured;
+		}
+		const float ViewW = CanvasSize.X;
+		const float ViewH = CanvasSize.Y;
+		CurrentHandCardScale = GetResponsiveHandScale(CanvasSize);
+		const bool bCompactHand = CurrentHandCardScale < 0.99f;
 
 		UCanvasPanel* HandLayer = NewObject<UCanvasPanel>(ScreenOvl);
 		UOverlaySlot* HandLayerSlot = ScreenOvl->AddChildToOverlay(HandLayer);
@@ -750,19 +940,24 @@ void AAscendPlayerController::RefreshCombatPanel()
 		HandLayerSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
 
 		const int32 N = Combat->Hand.Num();
-		const float FanAngle = 40.f;
-		const float FanRadius = ViewH * 0.35f;
-		const float CardW = 162.f;
-		const float CardH = 194.f;
-		const float FanCenterX = ViewW * 0.6f;
-		const float FanCenterY = ViewH * 1.5f;
+		const float CardW = AscendCardLayout::Width * CurrentHandCardScale;
+		const float CardH = AscendCardLayout::Height * CurrentHandCardScale;
+		const float HandBottomMargin = bCompactHand
+			? AscendCardLayout::CompactHandBottomMargin : AscendCardLayout::HandBottomMargin;
+		// 恢复底部居中的扇形持牌；悬停时仅改变卡面视觉（竖直上抬+放大），
+		// 按钮本身仍保留固定命中区域，避免 Hover/Unhover 震荡。
+		const float FanAngle = bCompactHand ? 46.f : 40.f;
+		const float FanRadius = ViewH * (bCompactHand ? 0.30f : 0.35f);
+		const float FanCenterX = ViewW * 0.5f;
+		const float FanCenterY = ViewH - HandBottomMargin + FanRadius;
 
 		for (int32 i = 0; i < N; ++i)
 		{
-			const bool bPlayable = Combat->GetEffectiveCost(Combat->Hand[i]) <= Combat->Spirit;
+			const bool bPlayable = !Combat->bPlayerTurnSkipped &&
+				(Combat->GetEffectiveCost(Combat->Hand[i]) <= Combat->Spirit);
 
 			UButton* CardBtn = NewObject<UButton>(HandLayer);
-			BuildCardWidget(CardBtn, i, bPlayable);
+			BuildCardWidget(CardBtn, i, bPlayable, CurrentHandCardScale);
 			if (!bPlayable) CardBtn->SetIsEnabled(false);
 
 			HandCardButtons.SetNum(FMath::Max(HandCardButtons.Num(), i + 1));
@@ -773,7 +968,11 @@ void AAscendPlayerController::RefreshCombatPanel()
 			Proxy->Index = i;
 			Proxy->Owner = this;
 			CardBtn->OnPressed.AddDynamic(Proxy, &UClickProxy::HandlePress);
-			Proxies.Add(Proxy);
+#if PLATFORM_ANDROID
+			// 触摸控件负责捕获手指释放；桌面端由 PlayerController 的鼠标释放统一处理。
+			CardBtn->OnReleased.AddDynamic(Proxy, &UClickProxy::HandleRelease);
+#endif
+			PendingScreenProxies.Add(Proxy);
 
 			UClickProxy* HoverProxy = NewObject<UClickProxy>(CardBtn);
 			HoverProxy->Tag = TEXT("hand_hover");
@@ -782,11 +981,10 @@ void AAscendPlayerController::RefreshCombatPanel()
 			HoverProxy->BoundButton = CardBtn;
 			CardBtn->OnHovered.AddDynamic(HoverProxy, &UClickProxy::HandleHovered);
 			CardBtn->OnUnhovered.AddDynamic(HoverProxy, &UClickProxy::HandleUnhovered);
-			Proxies.Add(HoverProxy);
+			PendingScreenProxies.Add(HoverProxy);
 
 			const float AngleDeg = (N > 1) ? (static_cast<float>(i) / (N - 1) - 0.5f) * FanAngle : 0.f;
 			const float AngleRad = FMath::DegreesToRadians(AngleDeg);
-
 			const float Bx = FanCenterX + FanRadius * FMath::Sin(AngleRad);
 			const float By = FanCenterY - FanRadius * FMath::Cos(AngleRad);
 			const float CardX = Bx - CardW * 0.5f;
@@ -797,10 +995,54 @@ void AAscendPlayerController::RefreshCombatPanel()
 				Slot->SetPosition(FVector2D(CardX, CardY));
 				Slot->SetSize(FVector2D(CardW, CardH));
 				Slot->SetZOrder(i);
-				CardBtn->SetRenderTransformPivot(FVector2D(0.5f, 1.0f));
-				CardBtn->SetRenderTransformAngle(AngleDeg);
+				// 只旋转卡面视觉，按钮命中区域保持固定，避免悬停抬升后反复 Hover/Unhover。
+				if (UWidget* CardVisual = CardBtn->GetContent())
+				{
+					CardVisual->SetRenderTransformPivot(FVector2D(0.5f, 1.0f));
+					CardVisual->SetRenderTransformAngle(AngleDeg);
+				}
 			}
 		}
+	}
+
+	// ---- 右侧独立圆形结束回合控件：不占据纵向布局，也不挤压手牌 ----
+	UCanvasPanel* EndTurnLayer = NewObject<UCanvasPanel>(ScreenOvl);
+	EndTurnLayer->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	UOverlaySlot* EndLayerSlot = ScreenOvl->AddChildToOverlay(EndTurnLayer);
+	EndLayerSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+	EndLayerSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+	UButton* EndTurnButton = MakeLinkedButton(EndTurnLayer, TEXT(""), TEXT("endturn"), 0, 20);
+	EndTurnButton->SetBackgroundColor(FLinearColor::Transparent);
+	EndTurnButton->SetIsEnabled(Combat->PendingDiscoverChoices.Num() == 0);
+	UOverlay* EndVisual = NewObject<UOverlay>(EndTurnButton);
+	if (UImage* EndFrame = FAscendArt::MakeImage(EndVisual, TEXT("Art/ui/hud_end_turn.png")))
+	{
+		EndFrame->SetVisibility(ESlateVisibility::HitTestInvisible);
+		UOverlaySlot* EndFrameSlot = EndVisual->AddChildToOverlay(EndFrame);
+		EndFrameSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+		EndFrameSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+	}
+	UScaleBox* EndTextScale = NewObject<UScaleBox>(EndVisual);
+	EndTextScale->SetStretch(EStretch::ScaleToFit);
+	EndTextScale->SetStretchDirection(EStretchDirection::DownOnly);
+	UTextBlock* EndText = Style::MakeText(EndTextScale,
+		Combat->bPlayerTurnSkipped ? TEXT("梦魇中\n结束回合") : TEXT("结束回合"),
+		Combat->bPlayerTurnSkipped ? 15 : 20, Style::GoldYellow());
+	EndText->SetJustification(ETextJustify::Center);
+	EndText->SetShadowOffset(FVector2D(1.f, 1.f));
+	EndTextScale->SetContent(EndText);
+	UOverlaySlot* EndTextSlot = EndVisual->AddChildToOverlay(EndTextScale);
+	EndTextSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+	EndTextSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+	EndTextSlot->SetPadding(FMargin(38.f, 42.f, 38.f, 49.f));
+	EndTurnButton->SetContent(EndVisual);
+	if (UCanvasPanelSlot* EndSlot = EndTurnLayer->AddChildToCanvas(EndTurnButton))
+	{
+		EndSlot->SetAnchors(FAnchors(1.f, 0.57f));
+		EndSlot->SetAlignment(FVector2D(1.f, 0.5f));
+		EndSlot->SetPosition(FVector2D(-24.f, 0.f));
+		EndSlot->SetSize(FVector2D(182.f, 182.f));
+		EndSlot->SetZOrder(300);
 	}
 
 	SetScreen(ScreenOvl, EGameScreen::Combat);
@@ -813,7 +1055,10 @@ void AAscendPlayerController::RefreshCombatPanel()
 	{
 		// 设初始动画状态：从牌堆位置缩小透明飞入（在 SetScreen 之后立即设置，首帧已渲染但用户不可见）
 		const FVector2D PileA(GetViewportSize().X - 100.f, GetViewportSize().Y - 200.f);
-		for (int32 si = 0; si < HandCardButtons.Num(); ++si)
+		const int32 FirstAnimatedCard = bInTurnDraw
+			? FMath::Max(0, HandCardButtons.Num() - Combat->PendingDrawCount)
+			: 0;
+		for (int32 si = FirstAnimatedCard; si < HandCardButtons.Num(); ++si)
 		{
 			if (!HandCardButtons[si].IsValid()) continue;
 			HandCardButtons[si]->SetRenderTranslation(PileA);
@@ -826,6 +1071,7 @@ void AAscendPlayerController::RefreshCombatPanel()
 	{
 		LastSeenTurnCount = Combat->TurnCount;
 		PlayHandEntranceAnimation(0);
+		Combat->PendingDrawCount = 0;
 	}
 	else if (bInTurnDraw)
 	{
@@ -899,7 +1145,12 @@ void AAscendPlayerController::ShowReward()
 		if (const FCardData* C = Run->GetCardData(DC.CardId))
 		{
 			UVerticalBox* CardBox = NewObject<UVerticalBox>(Box);
-			CardBox->AddChild(MakeCardContentFromData(CardBox, *C, DC.bUpgraded, 0.9f));
+			if (UVerticalBoxSlot* CardSlot = CardBox->AddChildToVerticalBox(
+				MakeCardContentFromData(CardBox, *C, DC.bUpgraded, 0.9f)))
+			{
+				CardSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Center);
+				CardSlot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
+			}
 			Pad(CardBox, 4);
 			UButton* Btn = MakeLinkedButton(CardBox, TEXT("【选择】"), TEXT("reward"), i, 16);
 			AddToVBox(CardBox, Btn, FMargin(0.f));
@@ -927,60 +1178,204 @@ void AAscendPlayerController::ShowReward()
 UWidget* AAscendPlayerController::MakeRelicCardContentFromData(UObject* Outer, const FRelicData& RelicData, float Scale)
 {
 	const float S = Scale;
+	{
+		using namespace AscendCardLayout;
+		const FLinearColor FixedRarityColor = RarityColor(RelicData.Rarity);
+		FString RarityLabel = TEXT("凡品");
+		if (RelicData.Rarity == TEXT("uncommon")) RarityLabel = TEXT("中品");
+		else if (RelicData.Rarity == TEXT("rare")) RarityLabel = TEXT("上品");
+		else if (RelicData.Rarity == TEXT("legendary")) RarityLabel = TEXT("仙品");
 
+		USizeBox* FixedSizer = NewObject<USizeBox>(Outer);
+		FixedSizer->SetWidthOverride(Width * S);
+		FixedSizer->SetHeightOverride(Height * S);
+		UCanvasPanel* Canvas = NewObject<UCanvasPanel>(FixedSizer);
+
+		UBorder* Backplate = NewObject<UBorder>(Canvas);
+		Backplate->SetBrushColor(FLinearColor(0.018f, 0.045f, 0.038f, 1.f));
+		PlaceCardWidget(Canvas, Backplate, InnerX, InnerY, InnerW, InnerH, S, 0);
+
+		UBorder* ArtClip = NewObject<UBorder>(Canvas);
+		ArtClip->SetClipping(EWidgetClipping::ClipToBounds);
+		ArtClip->SetBrushColor(FLinearColor(0.012f, 0.026f, 0.024f, 1.f));
+		ArtClip->SetPadding(FMargin(7.f * S, 7.f * S, 7.f * S, 5.f * S));
+		if (UImage* RelicImage = FAscendArt::MakeImage(ArtClip, RelicData.ArtPath))
+		{
+			UScaleBox* ArtScale = NewObject<UScaleBox>(ArtClip);
+			ArtScale->SetStretch(EStretch::ScaleToFit);
+			ArtScale->SetStretchDirection(EStretchDirection::DownOnly);
+			ArtScale->SetContent(RelicImage);
+			ArtClip->SetContent(ArtScale);
+		}
+		else
+		{
+			const FString Initials = RelicData.Name.Len() >= 2 ? RelicData.Name.Left(2) : TEXT("法器");
+			UTextBlock* Fallback = Style::MakeText(ArtClip, Initials, FMath::RoundToInt(26.f * S), Style::PaperWhite());
+			Fallback->SetJustification(ETextJustify::Center);
+			ArtClip->SetContent(Fallback);
+		}
+		PlaceCardWidget(Canvas, ArtClip, ArtX, ArtY, ArtW, ArtH, S, 5);
+
+		UOverlay* TitlePanel = NewObject<UOverlay>(Canvas);
+		if (UImage* TitleArt = FAscendArt::MakeImage(TitlePanel, TEXT("Art/ui/card_title_bar_v2.png")))
+		{
+			TitleArt->SetVisibility(ESlateVisibility::HitTestInvisible);
+			UOverlaySlot* TitleArtSlot = TitlePanel->AddChildToOverlay(TitleArt);
+			TitleArtSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+			TitleArtSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+		}
+		UTextBlock* NameText = Style::MakeText(TitlePanel, RelicData.Name,
+			FMath::Clamp(FMath::RoundToInt(14.f * S), 11, 17), FixedRarityColor);
+		NameText->SetJustification(ETextJustify::Center);
+		UScaleBox* NameScale = NewObject<UScaleBox>(TitlePanel);
+		NameScale->SetStretch(EStretch::ScaleToFit);
+		NameScale->SetStretchDirection(EStretchDirection::DownOnly);
+		NameScale->SetContent(NameText);
+		UOverlaySlot* NameSlot = TitlePanel->AddChildToOverlay(NameScale);
+		NameSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+		NameSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+		NameSlot->SetPadding(FMargin(17.f * S, 5.f * S, 17.f * S, 5.f * S));
+		PlaceCardWidget(Canvas, TitlePanel, TitleX, TitleY, TitleW, TitleH, S, 15);
+
+		UOverlay* RulesPanel = NewObject<UOverlay>(Canvas);
+		RulesPanel->SetClipping(EWidgetClipping::ClipToBounds);
+		if (UImage* RulesArt = FAscendArt::MakeImage(RulesPanel, TEXT("Art/ui/card_rules_panel_v2.png")))
+		{
+			RulesArt->SetVisibility(ESlateVisibility::HitTestInvisible);
+			UOverlaySlot* RulesArtSlot = RulesPanel->AddChildToOverlay(RulesArt);
+			RulesArtSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+			RulesArtSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+		}
+		UVerticalBox* Details = NewObject<UVerticalBox>(RulesPanel);
+		UTextBlock* RarityText = Style::MakeText(Details, RarityLabel,
+			FMath::Clamp(FMath::RoundToInt(9.f * S), 8, 11), FixedRarityColor);
+		RarityText->SetJustification(ETextJustify::Center);
+		Details->AddChildToVerticalBox(RarityText)->SetPadding(FMargin(0.f, 1.f * S, 0.f, 0.f));
+		UTextBlock* DescriptionText = Style::MakeText(Details, RelicData.Description,
+			FMath::Clamp(FMath::RoundToInt(10.f * S), 8, 12), Style::PaperWhite());
+		DescriptionText->SetAutoWrapText(true);
+		DescriptionText->SetWrapTextAt(120.f * S);
+		DescriptionText->SetJustification(ETextJustify::Center);
+		UScaleBox* DescriptionScale = NewObject<UScaleBox>(Details);
+		DescriptionScale->SetStretch(EStretch::ScaleToFit);
+		DescriptionScale->SetStretchDirection(EStretchDirection::DownOnly);
+		DescriptionScale->SetContent(DescriptionText);
+		UVerticalBoxSlot* DescriptionSlot = Details->AddChildToVerticalBox(DescriptionScale);
+		DescriptionSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		DescriptionSlot->SetPadding(FMargin(2.f * S, 0.f, 2.f * S, 2.f * S));
+		UOverlaySlot* DetailsSlot = RulesPanel->AddChildToOverlay(Details);
+		DetailsSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+		DetailsSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+		DetailsSlot->SetPadding(FMargin(10.f * S, 7.f * S, 10.f * S, 7.f * S));
+		PlaceCardWidget(Canvas, RulesPanel, RulesX, RulesY, RulesW, RulesH, S, 15);
+
+		if (UImage* Frame = FAscendArt::MakeImage(Canvas, TEXT("Art/ui/card_border_v2.png")))
+		{
+			Frame->SetVisibility(ESlateVisibility::HitTestInvisible);
+			PlaceCardWidget(Canvas, Frame, 0.f, 0.f, Width, Height, S, 40);
+		}
+		FixedSizer->SetContent(Canvas);
+		return FixedSizer;
+	}
+
+#if 0 // Legacy adaptive relic layout retained only for reference during the visual migration.
 	USizeBox* CardSizer = NewObject<USizeBox>(Outer);
-	CardSizer->SetWidthOverride(160.f * S);
-	CardSizer->SetHeightOverride(220.f * S);
+	CardSizer->SetWidthOverride(162.f * S);
+	CardSizer->SetHeightOverride(203.f * S);
 
 	const FLinearColor RCol = RarityColor(RelicData.Rarity);
 
-	UBorder* Frame = NewObject<UBorder>(CardSizer);
-	Frame->SetBrushColor(RCol * 0.4f + FLinearColor(0.08f, 0.07f, 0.05f) * 0.6f);
-	Frame->SetPadding(FMargin(3.f * S));
+	UOverlay* CardRoot = NewObject<UOverlay>(CardSizer);
+	UBorder* CardBase = NewObject<UBorder>(CardRoot);
+	CardBase->SetBrushColor(FLinearColor(0.025f, 0.070f, 0.060f, 1.f));
+	UOverlaySlot* BaseSlot = CardRoot->AddChildToOverlay(CardBase);
+	BaseSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+	BaseSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+	UImage* FrameArt = FAscendArt::MakeImage(CardRoot, TEXT("Art/ui/card_frame.png"));
+	if (FrameArt)
+	{
+		FrameArt->SetVisibility(ESlateVisibility::HitTestInvisible);
+		UOverlaySlot* FrameSlot = CardRoot->AddChildToOverlay(FrameArt);
+		FrameSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+		FrameSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+	}
 
-	UBorder* Face = NewObject<UBorder>(Frame);
-	Face->SetBrushColor(FLinearColor(0.28f, 0.24f, 0.20f));
+	UBorder* Face = NewObject<UBorder>(CardRoot);
+	Face->SetBrushColor(FLinearColor::Transparent);
+	UOverlaySlot* FaceSlot = CardRoot->AddChildToOverlay(Face);
+	FaceSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+	FaceSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+	FaceSlot->SetPadding(FMargin(16.f * S, 16.f * S, 16.f * S, 14.f * S));
 
 	UVerticalBox* VBox = NewObject<UVerticalBox>(Face);
 
 	UBorder* IconArea = NewObject<UBorder>(VBox);
-	IconArea->SetBrushColor(RCol * 0.3f + FLinearColor(0.13f, 0.11f, 0.09f) * 0.7f);
+	IconArea->SetBrushColor(FLinearColor(0.018f, 0.03f, 0.028f, 0.72f));
+	IconArea->SetClipping(EWidgetClipping::ClipToBounds);
+	IconArea->SetPadding(FMargin(9.f * S, 12.f * S, 9.f * S, 4.f * S));
 	UVerticalBoxSlot* IconSlot = VBox->AddChildToVerticalBox(IconArea);
 	FSlateChildSize FillAll(ESlateSizeRule::Fill);
-	FillAll.Value = 1.f;
+	FillAll.Value = 0.50f;
 	IconSlot->SetSize(FillAll);
 
-	FString Short2 = RelicData.Name.Len() >= 2 ? RelicData.Name.Mid(0, 2)
-		: (RelicData.Name.IsEmpty() ? TEXT("?") : RelicData.Name.Left(1));
-	UTextBlock* IconTxt = Style::MakeText(IconArea, Short2, 32.f * S, Style::PaperWhite());
-	IconTxt->SetJustification(ETextJustify::Center);
-	IconArea->SetContent(IconTxt);
+	if (UImage* RelicImage = FAscendArt::MakeImage(IconArea, RelicData.ArtPath))
+	{
+		UScaleBox* RelicScale = NewObject<UScaleBox>(IconArea);
+		RelicScale->SetStretch(EStretch::ScaleToFit);
+		RelicScale->SetStretchDirection(EStretchDirection::DownOnly);
+		RelicScale->SetContent(RelicImage);
+		IconArea->SetContent(RelicScale);
+	}
+	else
+	{
+		FString Short2 = RelicData.Name.Len() >= 2 ? RelicData.Name.Mid(0, 2)
+			: (RelicData.Name.IsEmpty() ? TEXT("?") : RelicData.Name.Left(1));
+		UTextBlock* IconTxt = Style::MakeText(IconArea, Short2, 26.f * S, Style::PaperWhite());
+		IconTxt->SetJustification(ETextJustify::Center);
+		IconArea->SetContent(IconTxt);
+	}
 
 	FString RarityCN = TEXT("凡品");
 	if (RelicData.Rarity == TEXT("uncommon")) RarityCN = TEXT("中品");
 	else if (RelicData.Rarity == TEXT("rare")) RarityCN = TEXT("上品");
 	else if (RelicData.Rarity == TEXT("legendary")) RarityCN = TEXT("仙品");
 
-	UBorder* RarityBar = NewObject<UBorder>(VBox);
-	RarityBar->SetBrushColor(RCol * 0.6f);
-	UTextBlock* RarityT = Style::MakeText(RarityBar, RarityCN, 10.f * S, Style::PaperWhite());
+	UBorder* RulesPanel = NewObject<UBorder>(VBox);
+	RulesPanel->SetClipping(EWidgetClipping::ClipToBounds);
+	RulesPanel->SetPadding(FMargin(7.f * S, 6.f * S, 7.f * S, 6.f * S));
+	RulesPanel->SetBrushColor(FLinearColor(0.035f, 0.085f, 0.070f, 0.99f));
+	UVerticalBoxSlot* RulesSlot = VBox->AddChildToVerticalBox(RulesPanel);
+	FSlateChildSize RulesFill(ESlateSizeRule::Fill);
+	RulesFill.Value = 0.50f;
+	RulesSlot->SetSize(RulesFill);
+
+	UVerticalBox* Details = NewObject<UVerticalBox>(RulesPanel);
+	UTextBlock* RarityT = Style::MakeText(Details, RarityCN, 10.f * S, RCol);
 	RarityT->SetJustification(ETextJustify::Center);
-	RarityBar->SetContent(RarityT);
-	VBox->AddChildToVerticalBox(RarityBar)->SetPadding(FMargin(0.f));
+	Details->AddChildToVerticalBox(RarityT)->SetPadding(FMargin(0.f));
 
-	UTextBlock* NameT = Style::MakeText(VBox, RelicData.Name, 14.f * S, RCol);
+	UTextBlock* NameT = Style::MakeText(Details, RelicData.Name, 14.f * S, RCol);
 	NameT->SetJustification(ETextJustify::Center);
-	VBox->AddChildToVerticalBox(NameT)->SetPadding(FMargin(4.f * S, 3.f * S));
+	Details->AddChildToVerticalBox(NameT)->SetPadding(FMargin(4.f * S, 2.f * S));
 
-	UTextBlock* DescT = Style::MakeText(VBox, RelicData.Description, 11.f * S, Style::PaperWhite());
+	UTextBlock* DescT = Style::MakeText(Details, RelicData.Description, 10.f * S, Style::PaperWhite());
 	DescT->SetAutoWrapText(true);
+	DescT->SetWrapTextAt(122.f * S);
 	DescT->SetJustification(ETextJustify::Center);
-	VBox->AddChildToVerticalBox(DescT)->SetPadding(FMargin(4.f * S, 1.f * S, 4.f * S, 4.f * S));
+	UScaleBox* DescScale = NewObject<UScaleBox>(Details);
+	DescScale->SetStretch(EStretch::ScaleToFit);
+	DescScale->SetStretchDirection(EStretchDirection::DownOnly);
+	DescScale->SetContent(DescT);
+	UVerticalBoxSlot* DescSlot = Details->AddChildToVerticalBox(DescScale);
+	DescSlot->SetPadding(FMargin(3.f * S, 1.f * S, 3.f * S, 2.f * S));
+	DescSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+
+	RulesPanel->SetContent(Details);
 
 	Face->SetContent(VBox);
-	Frame->SetContent(Face);
-	CardSizer->SetContent(Frame);
+	CardSizer->SetContent(CardRoot);
 	return CardSizer;
+#endif
 }
 
 // -----------------------------------------------------------
@@ -1089,7 +1484,10 @@ void AAscendPlayerController::ShowShop()
 	UVerticalBox* Box = NewObject<UVerticalBox>(Scroll);
 	Pad(Box, 40);
 
-	UTextBlock* T = Style::MakeText(Box, TEXT("坊 市"), 32, Style::GoldYellow());
+	const bool bNarrativeShop = bInfiniteFunctionFlowActive
+		&& ActiveInfiniteGameOperation.Op == TEXT("open_shop");
+	UTextBlock* T = Style::MakeText(Box, bNarrativeShop ? TEXT("仙 品 秘 市") : TEXT("坊 市"),
+		32, Style::GoldYellow());
 	T->SetJustification(ETextJustify::Center);
 	AddToVBox(Box, T);
 
@@ -1097,6 +1495,15 @@ void AAscendPlayerController::ShowShop()
 		FString::Printf(TEXT("灵石: %d"), Run->State.Gold), 20, Style::GoldYellow());
 	Gold->SetJustification(ETextJustify::Center);
 	AddToVBox(Box, Gold);
+	if (bNarrativeShop)
+	{
+		UTextBlock* Rule = Style::MakeText(Box,
+			FString::Printf(TEXT("仅售仙品卡牌 · 售价为正常价格的 %.0f%%"),
+				ActiveInfiniteGameOperation.PriceMultiplier * 100.f),
+			15, Style::DimGray());
+		Rule->SetJustification(ETextJustify::Center);
+		AddToVBox(Box, Rule, FMargin(10.f, 4.f));
+	}
 	Pad(Box, 12);
 
 	TArray<FShopItem> Stock = Run->GetShopStock();
@@ -1121,7 +1528,7 @@ void AAscendPlayerController::ShowShop()
 			CP->Index = Idx;
 			CP->Owner = this;
 			Btn->OnClicked.AddDynamic(CP, &UClickProxy::HandleClick);
-			Proxies.Add(CP);
+			PendingScreenProxies.Add(CP);
 		}
 		else
 		{
@@ -1315,10 +1722,24 @@ void AAscendPlayerController::ShowVictory()
 
 void AAscendPlayerController::BuildRelicSidebar(UHorizontalBox* HBox)
 {
-	UVerticalBox* Sidebar = NewObject<UVerticalBox>(HBox);
 	USizeBox* SidebarSize = NewObject<USizeBox>(HBox);
-	SidebarSize->SetWidthOverride(80.f);
-	SidebarSize->SetContent(Sidebar);
+	SidebarSize->SetWidthOverride(104.f);
+	UOverlay* SidebarRoot = NewObject<UOverlay>(SidebarSize);
+
+	if (UImage* SidebarFrame = FAscendArt::MakeImage(SidebarRoot, TEXT("Art/ui/hud_relic_sidebar.png")))
+	{
+		SidebarFrame->SetVisibility(ESlateVisibility::HitTestInvisible);
+		UOverlaySlot* FrameSlot = SidebarRoot->AddChildToOverlay(SidebarFrame);
+		FrameSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+		FrameSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+	}
+
+	UVerticalBox* Sidebar = NewObject<UVerticalBox>(SidebarRoot);
+	UOverlaySlot* SidebarSlot = SidebarRoot->AddChildToOverlay(Sidebar);
+	SidebarSlot->SetPadding(FMargin(13.f, 36.f, 13.f, 34.f));
+	SidebarSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+	SidebarSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+	SidebarSize->SetContent(SidebarRoot);
 	HBox->AddChildToHorizontalBox(SidebarSize)->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
 
 	if (!Run) return;
@@ -1331,18 +1752,48 @@ void AAscendPlayerController::BuildRelicSidebar(UHorizontalBox* HBox)
 
 		FString Short2 = RD->Name.Len() >= 2 ? RD->Name.Mid(0, 2) : (RD->Name.IsEmpty() ? TEXT("?") : RD->Name.Left(1));
 
-		FLinearColor RCol = RarityColor(RD->Rarity);
-		FLinearColor IconBg = RCol * 0.3f + FLinearColor(0.08f, 0.08f, 0.10f) * 0.7f;
-
 		UButton* IconBtn = NewObject<UButton>(Sidebar);
-		IconBtn->SetBackgroundColor(IconBg);
+		IconBtn->SetBackgroundColor(FLinearColor::Transparent);
+		USizeBox* IconSize = NewObject<USizeBox>(IconBtn);
+		IconSize->SetWidthOverride(78.f);
+		IconSize->SetHeightOverride(78.f);
+		UOverlay* IconVisual = NewObject<UOverlay>(IconSize);
+		IconVisual->SetClipping(EWidgetClipping::ClipToBounds);
 
-		UTextBlock* Txt = Style::MakeText(IconBtn, Short2, 18, Style::PaperWhite());
-		Txt->SetJustification(ETextJustify::Center);
-		IconBtn->SetContent(Txt);
+		bool bHasRelicArt = false;
+		if (!RD->ArtPath.IsEmpty())
+		{
+			if (UImage* RelicImg = FAscendArt::MakeImage(IconVisual, RD->ArtPath))
+			{
+				RelicImg->SetVisibility(ESlateVisibility::HitTestInvisible);
+				UOverlaySlot* ArtSlot = IconVisual->AddChildToOverlay(RelicImg);
+				ArtSlot->SetPadding(FMargin(3.f));
+				ArtSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+				ArtSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+				bHasRelicArt = true;
+			}
+		}
+
+		if (!bHasRelicArt)
+		{
+			UScaleBox* RelicTextScale = NewObject<UScaleBox>(IconVisual);
+			RelicTextScale->SetStretch(EStretch::ScaleToFit);
+			RelicTextScale->SetStretchDirection(EStretchDirection::DownOnly);
+			UTextBlock* Txt = Style::MakeText(RelicTextScale, Short2, 14, RarityColor(RD->Rarity));
+			Txt->SetJustification(ETextJustify::Center);
+			Txt->SetShadowOffset(FVector2D(1.f, 1.f));
+			RelicTextScale->SetContent(Txt);
+			UOverlaySlot* TextSlot = IconVisual->AddChildToOverlay(RelicTextScale);
+			TextSlot->SetPadding(FMargin(17.f));
+			TextSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
+			TextSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
+		}
+
+		IconSize->SetContent(IconVisual);
+		IconBtn->SetContent(IconSize);
 
 		UVerticalBoxSlot* Slot = Sidebar->AddChildToVerticalBox(IconBtn);
-		Slot->SetPadding(FMargin(0.f, 2.f));
+		Slot->SetPadding(FMargin(2.f, 5.f));
 		Slot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
 
 		// 悬停工具提示
@@ -1352,7 +1803,7 @@ void AAscendPlayerController::BuildRelicSidebar(UHorizontalBox* HBox)
 		HoverProxy->Owner = this;
 		IconBtn->OnHovered.AddDynamic(HoverProxy, &UClickProxy::HandleHovered);
 		IconBtn->OnUnhovered.AddDynamic(HoverProxy, &UClickProxy::HandleUnhovered);
-		Proxies.Add(HoverProxy);
+		PendingScreenProxies.Add(HoverProxy);
 
 		RelicIdx++;
 	}

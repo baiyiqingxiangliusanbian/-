@@ -9,7 +9,40 @@ struct FCardEffect
 {
 	GENERATED_BODY()
 
-	/** 动作类型: damage / damage_all / damage_random / damage_per_block / block / draw /
+	/**
+	 * 事件触发点。on_play 立即结算；其余触发点会在打出卡牌后注册为本场战斗规则。
+	 * 当前通用事件包括 before_gain_block / after_gain_block / on_turn_start /
+	 * on_turn_end / on_card_played / on_damage_dealt / on_damage_taken。
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Trigger = TEXT("on_play");
+
+	/** instant / turn / combat。非 on_play 规则默认持续至战斗结束。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Duration = TEXT("instant");
+
+	/** 通用脚本读取源：event_value / self_block / self_hp / missing_hp /
+	 *  self_spirit / self_status:<id> / target_status:<id>。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Source;
+
+	/** 通用脚本写入目标：self_block / self_hp / self_spirit / self_status:<id>。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Destination;
+
+	/** transfer 等动作完成后是否清空来源；event_value 表示拦截本次事件。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	bool bConsumeSource = false;
+
+	/** transfer 写入方式：add / set / min / max / multiply。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString WriteMode = TEXT("add");
+
+	/** 持续规则最多触发次数；0 表示在持续期内不限次数。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 MaxTriggers = 0;
+
+	/** 动作类型: damage / damage_all / damage_random / damage_per_block / block / draw / discover_draw /
 	 *  gain_spirit / spirit_next_turn / discard_random / self_damage / amplify_status /
 	 *  heal / apply_status / gain_gold / cleanse_toxicity /
 	 *  power(功法注册) / damage_per_status / damage_all_per_basic_gongfa /
@@ -36,6 +69,61 @@ struct FCardEffect
 	/** 状态层数 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	int32 StatusStacks = 0;
+
+	/** 通用字符串参数（卡牌引用或区域选择器 random/highest_cost/lowest_cost/type:<type>）。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Param;
+
+	/** 可选执行条件（例如 self_hp_below:50 / counter_at_least:3） */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Condition;
+
+	/** 动态数值来源（例如 counter / self_block / self_status:strength） */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString ScaleBy;
+
+	/** 每组动态变量增加的数值 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 ScaleFactor = 0;
+
+	/** 动态变量每多少点算一组 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 ScaleDivisor = 1;
+
+	/** 执行概率，0~1 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float Chance = 1.f;
+};
+
+/** 卡牌生效时的表现层定义。动画由 UI 解释，未知值会安全回退到通用命中特效。 */
+USTRUCT(BlueprintType)
+struct FCardVisualData
+{
+	GENERATED_BODY()
+
+	/** none / slash / fireball / impact / block / heal / draw */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Animation = TEXT("none");
+
+	/** none / sword_slash / fireball / block / heal / draw */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Sound = TEXT("none");
+
+	/** 十六进制颜色，例如 #EAF7FF */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FString Accent = TEXT("#FFFFFF");
+
+	/** 动画时长（秒） */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float Duration = 0.42f;
+
+	/** 受击时屏幕震动强度；0 表示不震动 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float Intensity = 4.f;
+
+	/** 多段视觉次数（剑气纵横等） */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 Count = 1;
 };
 
 /** 卡牌数据（JSON 驱动） */
@@ -108,6 +196,10 @@ struct FCardData
 	/** 计数条件: on_basic_play / on_basic_gongfa_play（满足条件时手牌中此卡 RepeatCount+1） */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FString CounterCondition;
+
+	/** 卡牌打出后的动画与音效定义 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	FCardVisualData Visual;
 };
 
 /** 敌人意图（AI 行为） */

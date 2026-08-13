@@ -41,11 +41,17 @@ FCardEffect UGameDataLibrary::ParseEffect(const TSharedPtr<FJsonObject>& Obj)
 	Obj->TryGetStringField(TEXT("action"), E.Action);
 	Obj->TryGetStringField(TEXT("target"), E.Target);
 	Obj->TryGetStringField(TEXT("status"), E.StatusId);
+	Obj->TryGetStringField(TEXT("param"), E.Param);
+	Obj->TryGetStringField(TEXT("condition"), E.Condition);
+	Obj->TryGetStringField(TEXT("scale_by"), E.ScaleBy);
 
 	double NumVal;
 	if (Obj->TryGetNumberField(TEXT("value"), NumVal)) E.Value = static_cast<int32>(NumVal);
 	if (Obj->TryGetNumberField(TEXT("times"), NumVal)) E.Times = FMath::Max(1, static_cast<int32>(NumVal));
 	if (Obj->TryGetNumberField(TEXT("stacks"), NumVal)) E.StatusStacks = static_cast<int32>(NumVal);
+	if (Obj->TryGetNumberField(TEXT("scale_factor"), NumVal)) E.ScaleFactor = static_cast<int32>(NumVal);
+	if (Obj->TryGetNumberField(TEXT("scale_divisor"), NumVal)) E.ScaleDivisor = FMath::Max(1, static_cast<int32>(NumVal));
+	if (Obj->TryGetNumberField(TEXT("chance"), NumVal)) E.Chance = FMath::Clamp(static_cast<float>(NumVal), 0.f, 1.f);
 
 	return E;
 }
@@ -97,6 +103,18 @@ bool UGameDataLibrary::LoadCards(TArray<FCardData>& OutCards, FString& OutError)
 		(*Obj)->TryGetBoolField(TEXT("exhaust"), Card.bExhaust);
 		(*Obj)->TryGetBoolField(TEXT("retain"), Card.bRetain);
 		(*Obj)->TryGetStringField(TEXT("counter_condition"), Card.CounterCondition);
+
+		const TSharedPtr<FJsonObject>* VisualObj;
+		if ((*Obj)->TryGetObjectField(TEXT("visual"), VisualObj))
+		{
+			(*VisualObj)->TryGetStringField(TEXT("animation"), Card.Visual.Animation);
+			(*VisualObj)->TryGetStringField(TEXT("sound"), Card.Visual.Sound);
+			(*VisualObj)->TryGetStringField(TEXT("accent"), Card.Visual.Accent);
+			double VisualNum;
+			if ((*VisualObj)->TryGetNumberField(TEXT("duration"), VisualNum)) Card.Visual.Duration = FMath::Max(0.05f, static_cast<float>(VisualNum));
+			if ((*VisualObj)->TryGetNumberField(TEXT("intensity"), VisualNum)) Card.Visual.Intensity = FMath::Max(0.f, static_cast<float>(VisualNum));
+			if ((*VisualObj)->TryGetNumberField(TEXT("count"), VisualNum)) Card.Visual.Count = FMath::Max(1, static_cast<int32>(VisualNum));
+		}
 
 		double NumVal;
 		if ((*Obj)->TryGetNumberField(TEXT("cost"), NumVal)) Card.Cost = static_cast<int32>(NumVal);

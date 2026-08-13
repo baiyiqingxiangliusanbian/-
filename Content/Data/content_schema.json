@@ -1,0 +1,170 @@
+{
+  "schema_version": 2,
+  "protocol": {
+    "envelope": {
+      "kind": "card | enemy | relic | pill | event | story",
+      "data": "single entity object"
+    },
+    "id_pattern": "^[a-z0-9_]+$",
+    "merge_rule": "same id replaces; new id appends"
+  },
+  "effect": {
+    "fields": {
+      "action": "required action id",
+      "target": "enemy | self | all_enemies | random_enemy",
+      "value": "base integer value",
+      "times": "repeat count, default 1",
+      "status": "status id",
+      "stacks": "status layers",
+      "param": "card id or action-specific string parameter",
+      "condition": "optional condition expression",
+      "chance": "0.0 to 1.0, default 1.0",
+      "scale_by": "optional runtime variable",
+      "scale_factor": "value gained per variable group",
+      "scale_divisor": "variable points per group, default 1",
+      "trigger": "on_play or a sandbox event hook",
+      "duration": "instant | turn | combat",
+      "source": "readable value used by transfer",
+      "destination": "writable value used by transfer",
+      "consume_source": "whether transfer clears its source",
+      "max_triggers": "0 for duration-unlimited, otherwise 1 to 99"
+    },
+    "value_formula": "value + floor(scale_source / scale_divisor) * scale_factor",
+    "actions": {
+      "damage": "damage one enemy",
+      "damage_all": "damage every living enemy",
+      "damage_random": "repeat damage against random enemies",
+      "self_damage": "lose HP without block; cannot reduce player below 1",
+      "block": "gain block",
+      "heal": "restore HP",
+      "draw": "draw cards",
+      "discard_random": "discard random cards",
+      "discard_hand": "discard every non-retained card except the resolving card",
+      "gain_spirit": "gain spirit",
+      "lose_spirit": "lose spirit",
+      "spirit_next_turn": "gain spirit next turn",
+      "apply_status": "add status stacks",
+      "remove_status": "remove status stacks",
+      "set_status": "set status to exact stacks",
+      "apply_temp_strength": "gain strength for the turn",
+      "gain_gold": "gain spirit stones",
+      "gain_max_hp": "increase max HP and current HP",
+      "cleanse_toxicity": "set toxicity to zero",
+      "create_card": "create param card in hand",
+      "add_card_to_draw": "create param card in draw pile",
+      "add_card_to_discard": "create param card in discard pile",
+      "power": "activate a combat-long power using status as power id",
+      "damage_per_block": "damage using current block as an additional source",
+      "damage_per_status": "single-target damage linked to status stacks",
+      "damage_all_per_status": "area damage linked to status stacks",
+      "block_per_status": "block linked to status stacks",
+      "amplify_status": "multiply existing status stacks",
+      "damage_all_per_repeat": "area damage linked to this card counter",
+      "damage_all_per_basic_gongfa": "area damage linked to basic and gongfa cards played",
+      "cost_free_basic_gongfa": "make basic and gongfa cards free this turn",
+      "defense_to_strength": "gain strength with an additional block-gained interaction",
+      "transfer": "convert a readable combat value into a writable value or status",
+      "none": "no active effect"
+    },
+    "conditions": [
+      "always",
+      "self_hp_below:50",
+      "self_hp_above:50",
+      "self_has_status:strength",
+      "self_missing_status:poison",
+      "target_has_status:poison",
+      "target_missing_status:weak",
+      "counter_at_least:3",
+      "hand_size_at_least:5",
+      "draw_pile_at_most:3",
+      "discard_pile_at_least:5"
+    ],
+    "scale_sources": [
+      "counter",
+      "self_block",
+      "missing_hp",
+      "hand_size",
+      "draw_pile",
+      "discard_pile",
+      "cards_played_this_turn",
+      "basic_gongfa_played",
+      "event_value",
+      "self_hp",
+      "self_spirit",
+      "self_status:strength",
+      "target_status:poison"
+    ],
+    "script_triggers": [
+      "on_play",
+      "on_turn_start",
+      "on_turn_end",
+      "on_card_played",
+      "on_damage_dealt",
+      "on_damage_taken",
+      "before_gain_block",
+      "after_gain_block"
+    ],
+    "script_durations": ["instant", "turn", "combat"],
+    "transfer_sources": ["event_value", "self_block", "self_hp", "self_spirit", "self_status:S", "target_status:S"],
+    "transfer_destinations": ["self_block", "self_hp", "self_spirit", "self_status:S", "target_status:S"],
+    "statuses": ["strength", "dexterity", "weak", "vulnerable", "burn", "poison", "nightmare", "temp_strength"]
+  },
+  "card": {
+    "required": ["id", "name", "type", "rarity", "cost", "description", "effects"],
+    "types": ["basic", "spell", "sword", "body", "talisman", "skill", "gongfa", "curse"],
+    "dynamic_description_tokens": ["{effect0}", "{effect1}", "{counter}", "{stacks:strength}", "{hand_size}", "{draw_pile}", "{discard_pile}"],
+    "optional": ["class", "flavor", "art", "retain", "exhaust", "counter_condition", "upgrade", "visual"],
+    "counter_conditions": ["on_basic_play", "on_basic_gongfa_play", "on_any_card_play", "on_same_type_play", "on_sword_play", "on_spell_play", "on_damage_dealt", "on_draw", "on_turn_start"],
+    "visual": {
+      "animation": ["none", "slash", "fireball", "impact", "block", "heal", "draw"],
+      "sound": ["none", "sword_slash", "fireball", "block", "heal", "draw"],
+      "accent": "hex color, for example #FF7A28",
+      "duration": "seconds",
+      "intensity": "screen shake strength; 0 disables shake",
+      "count": "number of repeated visual strikes"
+    }
+  },
+  "enemy": {
+    "required": ["id", "name", "tier", "hp", "intents"],
+    "tiers": ["normal", "elite", "boss"],
+    "intent_actions": ["attack", "attack_multi", "defend", "buff", "debuff", "heal_ally", "buff_ally"],
+    "abilities": "array of ability:value strings; existing engine ability registry remains supported"
+  },
+  "relic": {
+    "required": ["id", "name", "rarity", "description", "trigger", "effect"],
+    "triggers": ["none", "combat_start", "turn_start", "on_card_played", "on_player_turn_end", "on_damage_dealt", "on_hp_changed", "on_cards_discarded", "on_kill", "on_reshuffle", "on_victory", "on_loot", "pill_modifier"]
+  },
+  "pill": {
+    "required": ["id", "name", "description", "toxicity", "effect"]
+  },
+  "event": {
+    "required": ["id", "title", "text", "choices"]
+  },
+  "event_interpreter": {
+    "schema_version": "3.0-events",
+    "principle": "LLM emits declarative operations; only the local allow-listed gateway mutates game state or opens screens",
+    "operations": {
+      "hp": "signed HP delta; out-of-combat cost ignores block and cannot reduce below 1",
+      "gold": "signed spirit-stone delta",
+      "grant_card": "grant existing card by display name",
+      "grant_relic": "grant existing relic or companion by display name",
+      "remove_card": "remove a specifically named card",
+      "remove_relic": "remove a specifically named relic",
+      "choose_remove_card": "open a mandatory card-removal picker",
+      "choose_upgrade_card": "open a mandatory card-upgrade picker",
+      "open_shop": "open a generated shop and resume RP after leaving",
+      "open_reward": "open the standard three-card reward picker",
+      "open_rest": "open the standard rest choice"
+    },
+    "requirements": ["gold_at_least", "hp_above", "deck_at_least"],
+    "shop_example": {"op": "open_shop", "rarity": "legendary", "price_multiplier": 1.5},
+    "validation_error": {
+      "fields": ["code", "path", "message", "allowed", "minimum", "maximum"],
+      "repair_scope": "repair only rejected authored content; never regenerate narrative or unrelated branches"
+    }
+  },
+  "story": {
+    "root": "acts",
+    "required": ["act_id", "title", "start_beat", "beats"]
+  }
+}

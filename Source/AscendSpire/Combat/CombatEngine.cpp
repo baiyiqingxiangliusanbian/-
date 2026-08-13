@@ -46,6 +46,21 @@ bool UCombatEngine::InitData(FString& OutError)
 	return true;
 }
 
+void UCombatEngine::RegisterRuntimeEnemies(const TArray<FEnemyData>& RuntimeEnemies)
+{
+	for (const FEnemyData& Enemy : RuntimeEnemies)
+	{
+		if (!Enemy.Id.IsEmpty()) RuntimeEnemyOverrides.Add(Enemy);
+	}
+}
+
+void UCombatEngine::RegisterRuntimePlayerContent(const TArray<FCardData>& RuntimeCards,
+	const TArray<FRelicData>& RuntimeRelics)
+{
+	RuntimeCardOverrides = RuntimeCards;
+	RuntimeRelicOverrides = RuntimeRelics;
+}
+
 // -----------------------------------------------------------
 // 战斗开始
 // -----------------------------------------------------------
@@ -75,6 +90,23 @@ bool UCombatEngine::StartCombat(const TArray<FDeckCard>& Deck, const TArray<FStr
 		}
 	}
 
+	// 运行时变体覆盖静态 JSON 中的同名条目（通常是 proc_* 唯一 ID）。
+	for (const FEnemyData& RuntimeEnemy : RuntimeEnemyOverrides)
+	{
+		if (!RuntimeEnemy.Id.IsEmpty()) EnemyTable.Add(RuntimeEnemy.Id, RuntimeEnemy);
+	}
+	RuntimeEnemyOverrides.Reset();
+	for (const FCardData& RuntimeCard : RuntimeCardOverrides)
+	{
+		if (!RuntimeCard.Id.IsEmpty()) CardTable.Add(RuntimeCard.Id, RuntimeCard);
+	}
+	for (const FRelicData& RuntimeRelic : RuntimeRelicOverrides)
+	{
+		if (!RuntimeRelic.Id.IsEmpty()) RelicTable.Add(RuntimeRelic.Id, RuntimeRelic);
+	}
+	RuntimeCardOverrides.Reset();
+	RuntimeRelicOverrides.Reset();
+
 	Rng.Initialize(Seed);
 	NextCardUID = 1;
 
@@ -88,6 +120,7 @@ bool UCombatEngine::StartCombat(const TArray<FDeckCard>& Deck, const TArray<FStr
 	Toxicity = 0;
 	TurnCount = 0;
 	bVictory = false;
+	bPlayerTurnSkipped = false;
 	bCombatActive = true;
 	bPlayerAttackedThisTurn = false;
 	PlayingCardUID = -1;
@@ -96,6 +129,7 @@ bool UCombatEngine::StartCombat(const TArray<FDeckCard>& Deck, const TArray<FStr
 	FlowDrawsThisTurn = 0;
 	ActivePowerIds.Reset();
 	ActivePowerNames.Reset();
+	PendingDiscoverChoices.Reset();
 	CounterDamage = 0;
 
 	// 卡组
@@ -148,6 +182,12 @@ bool UCombatEngine::StartCombat(const TArray<FDeckCard>& Deck, const TArray<FStr
 	// 法宝
 	ActiveRelics.Reset();
 	RelicCounters.Reset();
+	ActiveCardRules.Reset();
+	ScriptVariables.Reset();
+	CurrentScriptEventValue = 0;
+	CurrentScriptEventTag.Reset();
+	ScriptEventDepth = 0;
+	LastPlayedCard = FCardInstance();
 	for (const FString& Id : OwnedRelicIds)
 	{
 		if (const FRelicData* R = RelicTable.Find(Id))
@@ -209,7 +249,7 @@ bool UCombatEngine::StartCombat(const TArray<FDeckCard>& Deck, const TArray<FStr
 
 void UCombatEngine::DrawCards(int32 Count)
 {
-	PendingDrawCount += Count;
+	int32 DrawnCount = 0;
 	for (int32 i = 0; i < Count; ++i)
 	{
 		if (DrawPile.Num() == 0)
@@ -220,14 +260,66 @@ void UCombatEngine::DrawCards(int32 Count)
 			ShuffleArray(DrawPile, Rng);
 			Log(TEXT("弃牌堆洗回抽牌堆"));
 			TriggerRelics(TEXT("on_reshuffle"));
+			int32 ReshuffleEventValue = DrawPile.Num();
+			TriggerCardRules(TEXT("on_reshuffle"), ReshuffleEventValue);
 		}
 		Hand.Add(DrawPile.Pop());
+		DrawnCount++;
+		IncrementHandCounters(TEXT("on_draw"));
 	}
+	PendingDrawCount += DrawnCount;
+	if (DrawnCount > 0)
+	{
+		int32 DrawEventValue = DrawnCount;
+		TriggerCardRules(TEXT("on_draw"), DrawEventValue);
+	}
+}
+
+void UCombatEngine::BeginDiscoverFromDrawPile(int32 SampleCount)
+{
+	PendingDiscoverChoices.Reset();
+	if (DrawPile.Num() == 0)
+	{
+		Log(TEXT("抽牌堆为空，无法获得指引"));
+		return;
+	}
+	TArray<int32> Available;
+	for (int32 Index = 0; Index < DrawPile.Num(); ++Index) Available.Add(Index);
+	const int32 Count = FMath::Clamp(SampleCount, 1, FMath::Min(5, DrawPile.Num()));
+	for (int32 Pick = 0; Pick < Count; ++Pick)
+	{
+		const int32 Slot = Rng.RandRange(0, Available.Num() - 1);
+		PendingDiscoverChoices.Add(DrawPile[Available[Slot]]);
+		Available.RemoveAtSwap(Slot);
+	}
+	Log(FString::Printf(TEXT("从抽牌堆的 %d 张候选中选择 1 张加入手牌"), PendingDiscoverChoices.Num()));
+}
+
+bool UCombatEngine::ResolveDiscoverChoice(int32 ChoiceIndex)
+{
+	if (!PendingDiscoverChoices.IsValidIndex(ChoiceIndex)) return false;
+	const FCardInstance Chosen = PendingDiscoverChoices[ChoiceIndex];
+	const int32 DrawIndex = DrawPile.IndexOfByPredicate(
+		[&Chosen](const FCardInstance& Card) { return Card.UID == Chosen.UID; });
+	if (DrawIndex == INDEX_NONE)
+	{
+		PendingDiscoverChoices.Reset();
+		Log(TEXT("候选牌已不在抽牌堆，选择取消"));
+		return false;
+	}
+	Hand.Add(DrawPile[DrawIndex]);
+	DrawPile.RemoveAt(DrawIndex);
+	PendingDiscoverChoices.Reset();
+	PendingDrawCount += 1;
+	IncrementHandCounters(TEXT("on_draw"));
+	Log(FString::Printf(TEXT("指引生效：将【%s】加入手牌"), *Chosen.GetDisplayName()));
+	return true;
 }
 
 void UCombatEngine::StartPlayerTurn()
 {
 	if (!bCombatActive) return;
+	bPlayerTurnSkipped = false;
 
 	TurnCount++;
 	if (TurnCount > 1)
@@ -262,15 +354,18 @@ void UCombatEngine::StartPlayerTurn()
 	bFreeBasicGongfaThisTurn = false;
 	FlowDrawsThisTurn = 0;
 	ResetTurnState();
+	int32 TurnEventValue = TurnCount;
+	TriggerCardRules(TEXT("on_turn_start"), TurnEventValue);
 
-	// 功法「剑罡护体功」: 回合开始时获得 剑意×2 罡气
-	if (HasPower(TEXT("sword_gang")))
+	// 功法「剑罡护体功」: 每个独立实例在回合开始时都结算一次。
+	const int32 SwordGangCount = GetPowerCount(TEXT("sword_gang"));
+	if (SwordGangCount > 0)
 	{
 		const int32 Intent = Player.GetStatusStacks(TEXT("strength"));
 		if (Intent > 0)
 		{
-			Log(TEXT("功法【剑罡护体功】运转: 剑意化为护体罡气"));
-			ApplyBlock(Player, Intent * 2);
+			Log(FString::Printf(TEXT("功法【剑罡护体功】运转: %d 重功法将剑意化为护体罡气"), SwordGangCount));
+			ApplyBlock(Player, Intent * 2 * SwordGangCount);
 		}
 	}
 
@@ -287,27 +382,31 @@ void UCombatEngine::StartPlayerTurn()
 	// 灼烧/中毒
 	if (TickDotStatuses(Player)) { CheckCombatEnd(); return; }
 
+	TriggerRelics(TEXT("turn_start"));
+
+	CardsPlayedThisTurn = 0;
+
+	// 每个存活的玩家回合都先建立手牌。梦魇只禁止行动，不应让手牌留在空状态。
+	DrawCards(5);
+
+	// 功法「剑仙真解」: 每个独立实例每回合额外抽2张
+	const int32 ImmortalDrawCount = GetPowerCount(TEXT("immortal_draw"));
+	if (ImmortalDrawCount > 0)
+	{
+		const int32 ExtraDraws = ImmortalDrawCount * 2;
+		Log(FString::Printf(TEXT("功法【剑仙真解】运转: %d 重功法额外抽%d张牌"), ImmortalDrawCount, ExtraDraws));
+		DrawCards(ExtraDraws);
+	}
+	IncrementHandCounters(TEXT("on_turn_start"));
+
 	// 梦魇: 累积3层则跳过此回合
 	if (Player.GetStatusStacks(TEXT("nightmare")) >= 3)
 	{
 		Log(TEXT("梦魇缠身! 你陷入无尽噩梦，跳过此回合"));
 		Player.AddStatus(TEXT("nightmare"), -3);
-		ResetTurnState();
-		RunEnemyPhase();
+		bPlayerTurnSkipped = true;
+		Log(FString::Printf(TEXT("梦魇回合仍抽取手牌：当前 %d 张；点击结束回合后恢复行动"), Hand.Num()));
 		return;
-	}
-
-	TriggerRelics(TEXT("turn_start"));
-
-	CardsPlayedThisTurn = 0;
-
-	DrawCards(5);
-
-	// 功法「剑仙真解」: 每回合额外抽2张
-	if (HasPower(TEXT("immortal_draw")))
-	{
-		Log(TEXT("功法【剑仙真解】运转: 额外抽2张牌"));
-		DrawCards(2);
 	}
 	FString HandStr;
 	for (int32 i = 0; i < Hand.Num(); ++i)
@@ -342,9 +441,17 @@ void UCombatEngine::StartPlayerTurn()
 void UCombatEngine::EndPlayerTurn()
 {
 	if (!bCombatActive) return;
+	if (PendingDiscoverChoices.Num() > 0)
+	{
+		Log(TEXT("请先完成候选牌选择"));
+		return;
+	}
 	UE_LOG(LogTemp, Display, TEXT("[DIAG] EndPlayerTurn start"));
 
 	LastTurnHandSize = Hand.Num();
+	PendingTurnEndDiscardUIDs.Reset();
+	int32 TurnEventValue = TurnCount;
+	TriggerCardRules(TEXT("on_turn_end"), TurnEventValue);
 	TriggerRelics(TEXT("on_player_turn_end"));
 
 	// 弃掉手牌（「保留」牌留在手中）
@@ -354,13 +461,21 @@ void UCombatEngine::EndPlayerTurn()
 		for (FCardInstance& C : Hand)
 		{
 			if (C.Data.bRetain) Kept.Add(C);
-			else { C.RepeatCount = 0; DiscardPile.Add(C); DiscardedCount++; }
+			else
+			{
+				C.RepeatCount = 0;
+				PendingTurnEndDiscardUIDs.Add(C.UID);
+				DiscardPile.Add(C);
+				DiscardedCount++;
+			}
 		}
 		Hand = Kept;
 	}
 	if (DiscardedCount > 0)
 	{
 		TriggerRelicsWithValue(TEXT("on_cards_discarded"), DiscardedCount);
+		int32 DiscardEventValue = DiscardedCount;
+		TriggerCardRules(TEXT("on_discard"), DiscardEventValue);
 	}
 
 	// 手牌上限: 若敌人有 hand_limit 能力，弃牌至上限
@@ -372,6 +487,7 @@ void UCombatEngine::EndPlayerTurn()
 		{
 			int32 DropIdx = Rng.RandRange(0, Hand.Num() - 1);
 			Hand[DropIdx].RepeatCount = 0;
+			PendingTurnEndDiscardUIDs.Add(Hand[DropIdx].UID);
 			DiscardPile.Add(Hand[DropIdx]);
 			Hand.RemoveAt(DropIdx);
 		}
@@ -491,6 +607,7 @@ void UCombatEngine::RunEnemyPhase()
 TArray<int32> UCombatEngine::GetPlayableCardIndices() const
 {
 	TArray<int32> Result;
+	if (bPlayerTurnSkipped) return Result;
 	for (int32 i = 0; i < Hand.Num(); ++i)
 	{
 		if (GetEffectiveCost(Hand[i]) <= Spirit) Result.Add(i);
@@ -519,17 +636,44 @@ int32 UCombatEngine::GetEffectiveCost(const FCardInstance& Card) const
 	return Cost;
 }
 
+int32 UCombatEngine::GetPowerCount(const FString& PowerId) const
+{
+	if (PowerId.IsEmpty()) return 0;
+
+	int32 Count = 0;
+	for (const FString& ActiveId : ActivePowerIds)
+	{
+		if (ActiveId == PowerId) ++Count;
+	}
+	return Count;
+}
+
 void UCombatEngine::AddPower(const FString& PowerId, const FString& SourceCardName)
 {
-	if (PowerId.IsEmpty() || ActivePowerIds.Contains(PowerId)) return;
+	if (PowerId.IsEmpty()) return;
+
+	// 功法是“独立实例”而不是布尔开关：同一张功法可以再次打出，
+	// 每次注册都保留一个实例，后续触发按实例数量分别结算。
 	ActivePowerIds.Add(PowerId);
 	ActivePowerNames.Add(SourceCardName);
-	Log(FString::Printf(TEXT("功法运转: 【%s】将持续生效至本场战斗结束"), *SourceCardName));
+	const int32 InstanceCount = GetPowerCount(PowerId);
+	Log(FString::Printf(TEXT("功法运转: 【%s】第%d重（当前%d重，持续至本场战斗结束）"),
+		*SourceCardName, InstanceCount, InstanceCount));
 }
 
 bool UCombatEngine::PlayCard(int32 HandIndex, int32 TargetEnemyIndex)
 {
 	if (!bCombatActive) return false;
+	if (PendingDiscoverChoices.Num() > 0)
+	{
+		Log(TEXT("请先从地图揭示的候选中选择一张牌"));
+		return false;
+	}
+	if (bPlayerTurnSkipped)
+	{
+		Log(TEXT("梦魇缠身，本回合无法出牌"));
+		return false;
+	}
 	if (!Hand.IsValidIndex(HandIndex)) return false;
 
 	const FCardInstance Card = Hand[HandIndex];
@@ -556,8 +700,10 @@ bool UCombatEngine::PlayCard(int32 HandIndex, int32 TargetEnemyIndex)
 		}
 	}
 
-	Spirit -= EffectiveCost;
-	Log(FString::Printf(TEXT("打出 %s (耗费%d)"), *Card.GetDisplayName(), EffectiveCost));
+	int32 SpendEventValue = EffectiveCost;
+	Spirit -= SpendEventValue;
+	Log(FString::Printf(TEXT("打出 %s (耗费%d)"), *Card.GetDisplayName(), SpendEventValue));
+	LastPlayedCard = Card;
 
 	// 标记正在打出的牌（discard_random 等效果需排除自身）
 	PlayingCardUID = Card.UID;
@@ -577,20 +723,24 @@ bool UCombatEngine::PlayCard(int32 HandIndex, int32 TargetEnemyIndex)
 	}
 	// ---- 一剑系统：归真诀处理 ----
 	const bool bIsOneSword = (Card.Data.Id == TEXT("one_sword"));
-	if (bIsOneSword && HasPower(TEXT("one_sword_return")))
+	const int32 OneSwordReturnCount = GetPowerCount(TEXT("one_sword_return"));
+	if (bIsOneSword && OneSwordReturnCount > 0)
 	{
 		// 归真诀：一剑不消失，放回手牌
 		Hand.Add(Card);
-		Log(TEXT("功法【一剑归真诀】: 一剑不消失，保留在手"));
+		Log(FString::Printf(TEXT("功法【一剑归真诀】%d 重: 一剑不消失，保留在手"), OneSwordReturnCount));
 
-		// 每回合第一次打出一剑时生成临时复制
+		// 每个独立实例在每回合第一次打出一剑时各生成一张临时复制。
 		if (!bFirstOneSwordReturnedThisTurn)
 		{
 			bFirstOneSwordReturnedThisTurn = true;
-			FCardInstance Copy = MakeCard(TEXT("one_sword"));
-			Copy.Data.bExhaust = true; // 复制体正常消失
-			Hand.Add(Copy);
-			Log(TEXT("功法【一剑归真诀】: 生成一张临时复制【一剑】"));
+			for (int32 CopyIndex = 0; CopyIndex < OneSwordReturnCount; ++CopyIndex)
+			{
+				FCardInstance Copy = MakeCard(TEXT("one_sword"));
+				Copy.Data.bExhaust = true; // 复制体正常消失
+				Hand.Add(Copy);
+			}
+			Log(FString::Printf(TEXT("功法【一剑归真诀】: 生成%d张临时复制【一剑】"), OneSwordReturnCount));
 		}
 	}
 	else if (Card.Data.Id == TEXT("wan_jian_gui_zong"))
@@ -605,6 +755,8 @@ bool UCombatEngine::PlayCard(int32 HandIndex, int32 TargetEnemyIndex)
 	{
 		ExhaustPile.Add(Card);
 		Log(FString::Printf(TEXT("%s 被消耗"), *Card.GetDisplayName()));
+		int32 ExhaustEventValue = 1;
+		TriggerCardRules(TEXT("on_exhaust"), ExhaustEventValue, TargetEnemyIndex, Card.Data.Type);
 	}
 	else
 	{
@@ -617,53 +769,56 @@ bool UCombatEngine::PlayCard(int32 HandIndex, int32 TargetEnemyIndex)
 	// 法器：出牌后触发
 	CardsPlayedThisTurn++;
 	TriggerRelicsWithValue(TEXT("on_card_played"), CardsPlayedThisTurn);
+	int32 PlayedEventValue = CardsPlayedThisTurn;
+	TriggerCardRules(TEXT("on_card_played"), PlayedEventValue, TargetEnemyIndex, Card.Data.Type);
+	if (SpendEventValue > 0)
+	{
+		int32 SpentEventValue = SpendEventValue;
+		TriggerCardRules(TEXT("after_spend_spirit"), SpentEventValue, TargetEnemyIndex, Card.Data.Type);
+	}
 
 	// ---- 流派钩子：基础卡/功法卡 ----
 	const FString& CardType = Card.Data.Type;
+	IncrementHandCounters(TEXT("on_card_played"), CardType);
 	if (CardType == TEXT("basic") || CardType == TEXT("gongfa"))
 	{
 		BasicGongfaPlayedThisCombat++;
 
-		// 手牌中计数卡累计
-		for (FCardInstance& HC : Hand)
+		// 功法「蓄剑诀」: 每个独立实例各提供1层临时力量
+		const int32 SwordIntentCount = GetPowerCount(TEXT("sword_intent"));
+		if (SwordIntentCount > 0)
 		{
-			const FString Cond = HC.GetCounterCondition();
-			if (Cond == TEXT("on_basic_gongfa_play") ||
-				(CardType == TEXT("basic") && Cond == TEXT("on_basic_play")))
-			{
-				HC.RepeatCount++;
-				Log(FString::Printf(TEXT("【%s】计数+1 (当前%d)"), *HC.GetDisplayName(), HC.RepeatCount));
-			}
+			ApplyTempStrength(Player, SwordIntentCount, TEXT("蓄剑诀"));
 		}
 
-		// 功法「蓄剑诀」: 每打出基础卡/功法卡，获得1层临时力量
-		if (HasPower(TEXT("sword_intent")))
+		// 功法「流水剑经」: 每个实例每回合最多触发2次，实例之间互不共用上限。
+		const int32 FlowSutraCount = GetPowerCount(TEXT("flow_sutra"));
+		if (CardType == TEXT("basic") && FlowSutraCount > 0 && FlowDrawsThisTurn < FlowSutraCount * 2)
 		{
-			ApplyTempStrength(Player, 1, TEXT("蓄剑诀"));
+			const int32 TriggerCount = FMath::Min(FlowSutraCount, FlowSutraCount * 2 - FlowDrawsThisTurn);
+			FlowDrawsThisTurn += TriggerCount;
+			Log(FString::Printf(TEXT("功法【流水剑经】运转: %d 重功法抽%d张牌"), TriggerCount, TriggerCount));
+			DrawCards(TriggerCount);
 		}
 
-		// 功法「流水剑经」: 每打出基础卡抽1张（每回合至多2次）
-		if (CardType == TEXT("basic") && HasPower(TEXT("flow_sutra")) && FlowDrawsThisTurn < 2)
+		// 功法「剑意不绝」: 每个实例每回合最多触发3次，实例之间互不共用上限。
+		const int32 SwordArtFlowCount = GetPowerCount(TEXT("sword_art_flow"));
+		if (SwordArtFlowCount > 0 && SwordArtFlowTriggeredThisTurn < SwordArtFlowCount * 3)
 		{
-			FlowDrawsThisTurn++;
-			Log(TEXT("功法【流水剑经】运转: 抽1张牌"));
-			DrawCards(1);
-		}
-
-		// 功法「剑意不绝」: 每打出基础卡/招式卡，强化一剑+3（每回合至多3次）
-		if (HasPower(TEXT("sword_art_flow")) && SwordArtFlowTriggeredThisTurn < 3)
-		{
-			SwordArtFlowTriggeredThisTurn++;
-			OneSwordEnhance += 3;
-			Log(FString::Printf(TEXT("功法【剑意不绝】: 强化【一剑】+%d (当前强化 %d)"), 3, OneSwordEnhance));
+			const int32 TriggerCount = FMath::Min(SwordArtFlowCount, SwordArtFlowCount * 3 - SwordArtFlowTriggeredThisTurn);
+			SwordArtFlowTriggeredThisTurn += TriggerCount;
+			OneSwordEnhance += TriggerCount * 3;
+			Log(FString::Printf(TEXT("功法【剑意不绝】运转: %d 重功法强化【一剑】+%d (当前强化 %d)"),
+				TriggerCount, TriggerCount * 3, OneSwordEnhance));
 			EnsureOneSwordInHand();
 		}
 
-		// 功法「剑墟遗刻」: 每回合第一张基础卡额外+1力量
-		if (CardType == TEXT("basic") && HasPower(TEXT("sword_relic_inscription")) && !bFirstBasicPlayedThisTurn)
+		// 功法「剑墟遗刻」: 每个实例都在本回合第一张基础卡上提供1层力量。
+		const int32 SwordRelicInscriptionCount = GetPowerCount(TEXT("sword_relic_inscription"));
+		if (CardType == TEXT("basic") && SwordRelicInscriptionCount > 0 && !bFirstBasicPlayedThisTurn)
 		{
 			bFirstBasicPlayedThisTurn = true;
-			ApplyStatusTo(Player, TEXT("strength"), 1, TEXT("剑墟遗刻"));
+			ApplyStatusTo(Player, TEXT("strength"), SwordRelicInscriptionCount, TEXT("剑墟遗刻"));
 		}
 
 		// 首张基础卡标记（即使没有剑墟遗刻也要标记防止重复）
@@ -673,21 +828,53 @@ bool UCombatEngine::PlayCard(int32 HandIndex, int32 TargetEnemyIndex)
 		}
 	}
 
-	// 招式卡也触发剑意不绝
-	if (CardType == TEXT("zhaoshi") && HasPower(TEXT("sword_art_flow")) && SwordArtFlowTriggeredThisTurn < 3)
+	// 招式卡也触发剑意不绝；每个实例独立消耗自己的每回合3次额度。
+	const int32 SwordArtFlowCount = GetPowerCount(TEXT("sword_art_flow"));
+	if (CardType == TEXT("zhaoshi") && SwordArtFlowCount > 0 && SwordArtFlowTriggeredThisTurn < SwordArtFlowCount * 3)
 	{
-		SwordArtFlowTriggeredThisTurn++;
-		OneSwordEnhance += 3;
-		Log(FString::Printf(TEXT("功法【剑意不绝】: 强化【一剑】+%d (当前强化 %d)"), 3, OneSwordEnhance));
+		const int32 TriggerCount = FMath::Min(SwordArtFlowCount, SwordArtFlowCount * 3 - SwordArtFlowTriggeredThisTurn);
+		SwordArtFlowTriggeredThisTurn += TriggerCount;
+		OneSwordEnhance += TriggerCount * 3;
+		Log(FString::Printf(TEXT("功法【剑意不绝】运转: %d 重功法强化【一剑】+%d (当前强化 %d)"),
+			TriggerCount, TriggerCount * 3, OneSwordEnhance));
 		EnsureOneSwordInHand();
 	}
 
 	return true;
 }
 
+void UCombatEngine::IncrementHandCounters(const FString& Event, const FString& PlayedCardType, int32 Amount)
+{
+	if (Amount <= 0) return;
+	for (FCardInstance& Card : Hand)
+	{
+		const FString Condition = Card.GetCounterCondition();
+		bool bMatches = Condition == Event;
+		if (Event == TEXT("on_card_played"))
+		{
+			bMatches = Condition == TEXT("on_any_card_play")
+				|| (Condition == TEXT("on_basic_play") && PlayedCardType == TEXT("basic"))
+				|| (Condition == TEXT("on_basic_gongfa_play")
+					&& (PlayedCardType == TEXT("basic") || PlayedCardType == TEXT("gongfa")))
+				|| (Condition == TEXT("on_same_type_play") && Card.Data.Type == PlayedCardType)
+				|| (Condition == TEXT("on_sword_play") && PlayedCardType == TEXT("sword"))
+				|| (Condition == TEXT("on_spell_play") && PlayedCardType == TEXT("spell"));
+		}
+		if (!bMatches) continue;
+		Card.RepeatCount += Amount;
+		Log(FString::Printf(TEXT("【%s】计数+%d (当前%d)"), *Card.GetDisplayName(), Amount, Card.RepeatCount));
+	}
+}
+
 bool UCombatEngine::UsePill(const FString& PillId)
 {
 	if (!bCombatActive || !Player.IsAlive()) return false;
+	if (PendingDiscoverChoices.Num() > 0) return false;
+	if (bPlayerTurnSkipped)
+	{
+		Log(TEXT("梦魇缠身，本回合无法服用丹药"));
+		return false;
+	}
 
 	const FPillData* Pill = PillTable.Find(PillId);
 	if (!Pill)
@@ -730,32 +917,406 @@ bool UCombatEngine::UsePill(const FString& PillId)
 
 void UCombatEngine::ExecuteCardEffects(const FCardInstance& Card, int32 TargetEnemyIndex)
 {
-	// 功法「剑心通明经」: 基础卡效果生效两次
-	const int32 Reps = (Card.Data.Type == TEXT("basic") && HasPower(TEXT("heart_clear"))) ? 2 : 1;
-	if (Reps > 1) Log(TEXT("功法【剑心通明经】运转: 基础卡效果再生一次"));
+	// 功法「剑心通明经」: 每个独立实例都让基础卡额外生效一次。
+	const int32 HeartClearCount = GetPowerCount(TEXT("heart_clear"));
+	const int32 Reps = (Card.Data.Type == TEXT("basic")) ? 1 + HeartClearCount : 1;
+	if (HeartClearCount > 0)
+	{
+		Log(FString::Printf(TEXT("功法【剑心通明经】运转: %d 重功法让基础卡额外生效%d次"),
+			HeartClearCount, HeartClearCount));
+	}
 
 	PendingPowerSourceName = Card.GetDisplayName();
+	for (const FCardEffect& E : Card.GetEffects())
+	{
+		if (!E.Trigger.IsEmpty() && E.Trigger != TEXT("on_play"))
+			RegisterCardRule(E, Card.GetDisplayName());
+	}
 	for (int32 Rep = 0; Rep < Reps; ++Rep)
 	{
 		for (const FCardEffect& E : Card.GetEffects())
 		{
+			if (!E.Trigger.IsEmpty() && E.Trigger != TEXT("on_play")) continue;
 			ExecuteEffect(E, TargetEnemyIndex, true, &Card);
 		}
 	}
 	PendingPowerSourceName.Empty();
 }
 
+void UCombatEngine::RegisterCardRule(const FCardEffect& Effect, const FString& SourceName)
+{
+	if (Effect.Trigger.IsEmpty() || Effect.Trigger == TEXT("on_play")) return;
+	FActiveCardRule Rule;
+	Rule.Effect = Effect;
+	if (Rule.Effect.Duration.IsEmpty() || Rule.Effect.Duration == TEXT("instant"))
+		Rule.Effect.Duration = TEXT("combat");
+	Rule.SourceName = SourceName;
+	ActiveCardRules.Add(MoveTemp(Rule));
+	Log(FString::Printf(TEXT("【%s】建立规则：%s（持续%s）"), *SourceName, *Effect.Trigger,
+		Effect.Duration == TEXT("turn") ? TEXT("本回合") : TEXT("本场战斗")));
+}
+
+int32 UCombatEngine::ReadScriptValue(const FString& Source, int32 TargetEnemyIndex) const
+{
+	if (Source == TEXT("event_value")) return CurrentScriptEventValue;
+	if (Source == TEXT("turn")) return TurnCount;
+	if (Source == TEXT("enemy_count")) return GetAliveEnemyIndices().Num();
+	if (Source == TEXT("self_block")) return Player.Block;
+	if (Source == TEXT("self_hp")) return Player.HP;
+	if (Source == TEXT("missing_hp")) return FMath::Max(0, Player.MaxHP - Player.HP);
+	if (Source == TEXT("self_spirit")) return Spirit;
+	if (Source == TEXT("hand_size")) return Hand.Num();
+	if (Source == TEXT("draw_pile")) return DrawPile.Num();
+	if (Source == TEXT("discard_pile")) return DiscardPile.Num();
+	if (Source == TEXT("exhaust_pile")) return ExhaustPile.Num();
+	if (Source == TEXT("last_card_cost")) return LastPlayedCard.Data.Id.IsEmpty() ? 0 : GetEffectiveCost(LastPlayedCard);
+	if (Source == TEXT("target_hp") && Enemies.IsValidIndex(TargetEnemyIndex)) return Enemies[TargetEnemyIndex].State.HP;
+	if (Source == TEXT("target_missing_hp") && Enemies.IsValidIndex(TargetEnemyIndex))
+		return FMath::Max(0, Enemies[TargetEnemyIndex].State.MaxHP - Enemies[TargetEnemyIndex].State.HP);
+	if (Source == TEXT("target_block") && Enemies.IsValidIndex(TargetEnemyIndex)) return Enemies[TargetEnemyIndex].State.Block;
+	if (Source.StartsWith(TEXT("var:"))) return ScriptVariables.FindRef(Source.Mid(4));
+	if (Source.StartsWith(TEXT("self_status:"))) return Player.GetStatusStacks(Source.Mid(12));
+	if (Source.StartsWith(TEXT("target_status:")) && Enemies.IsValidIndex(TargetEnemyIndex))
+		return Enemies[TargetEnemyIndex].State.GetStatusStacks(Source.Mid(14));
+	return 0;
+}
+
+void UCombatEngine::WriteScriptValue(const FString& Destination, int32 Value, const FString& WriteMode,
+	int32 TargetEnemyIndex, const FString& SourceName)
+{
+	auto ResolveWrittenValue = [&WriteMode, Value](int32 Current)
+	{
+		if (WriteMode == TEXT("set")) return Value;
+		if (WriteMode == TEXT("min")) return FMath::Min(Current, Value);
+		if (WriteMode == TEXT("max")) return FMath::Max(Current, Value);
+		if (WriteMode == TEXT("multiply")) return FMath::Clamp(Current * Value, -9999, 9999);
+		return FMath::Clamp(Current + Value, -9999, 9999);
+	};
+	if (Destination == TEXT("self_block"))
+	{
+		const int32 NewValue = FMath::Max(0, ResolveWrittenValue(Player.Block));
+		const int32 Delta = NewValue - Player.Block;
+		if (Delta > 0) ApplyBlock(Player, Delta);
+		else Player.Block = NewValue;
+	}
+	else if (Destination == TEXT("self_hp"))
+	{
+		Player.HP = FMath::Clamp(ResolveWrittenValue(Player.HP), 1, Player.MaxHP);
+	}
+	else if (Destination == TEXT("self_spirit"))
+	{
+		Spirit = FMath::Max(0, ResolveWrittenValue(Spirit));
+	}
+	else if (Destination == TEXT("target_block") && Enemies.IsValidIndex(TargetEnemyIndex))
+	{
+		FCombatantState& Target = Enemies[TargetEnemyIndex].State;
+		Target.Block = FMath::Max(0, ResolveWrittenValue(Target.Block));
+	}
+	else if (Destination == TEXT("target_hp") && Enemies.IsValidIndex(TargetEnemyIndex))
+	{
+		FCombatantState& Target = Enemies[TargetEnemyIndex].State;
+		Target.HP = FMath::Clamp(ResolveWrittenValue(Target.HP), 0, Target.MaxHP);
+	}
+	else if (Destination.StartsWith(TEXT("var:")))
+	{
+		const FString Key = Destination.Mid(4);
+		ScriptVariables.FindOrAdd(Key) = ResolveWrittenValue(ScriptVariables.FindRef(Key));
+	}
+	else if (Destination.StartsWith(TEXT("self_status:")))
+	{
+		const FString StatusId = Destination.Mid(12);
+		const int32 Current = Player.GetStatusStacks(StatusId);
+		const int32 Delta = ResolveWrittenValue(Current) - Current;
+		if (Delta != 0) ApplyStatusTo(Player, StatusId, Delta, SourceName);
+	}
+	else if (Destination.StartsWith(TEXT("target_status:")) && Enemies.IsValidIndex(TargetEnemyIndex))
+	{
+		const FString StatusId = Destination.Mid(14);
+		FCombatantState& Target = Enemies[TargetEnemyIndex].State;
+		const int32 Current = Target.GetStatusStacks(StatusId);
+		const int32 Delta = ResolveWrittenValue(Current) - Current;
+		if (Delta != 0) ApplyStatusTo(Target, StatusId, Delta, SourceName);
+	}
+}
+
+TArray<FCardInstance>* UCombatEngine::ResolveCardZone(const FString& Zone)
+{
+	if (Zone == TEXT("hand")) return &Hand;
+	if (Zone == TEXT("draw") || Zone == TEXT("draw_top") || Zone == TEXT("draw_random")) return &DrawPile;
+	if (Zone == TEXT("discard")) return &DiscardPile;
+	if (Zone == TEXT("exhaust")) return &ExhaustPile;
+	return nullptr;
+}
+
+const TArray<FCardInstance>* UCombatEngine::ResolveCardZone(const FString& Zone) const
+{
+	return const_cast<UCombatEngine*>(this)->ResolveCardZone(Zone);
+}
+
+bool UCombatEngine::CardMatchesScriptSelector(const FCardInstance& Card, const FString& Selector) const
+{
+	if (Selector.IsEmpty() || Selector == TEXT("any") || Selector == TEXT("random")
+		|| Selector == TEXT("highest_cost") || Selector == TEXT("lowest_cost")) return true;
+	if (Selector == TEXT("upgraded")) return Card.bUpgraded;
+	if (Selector == TEXT("non_upgraded")) return !Card.bUpgraded;
+	if (Selector == TEXT("retained")) return Card.Data.bRetain;
+	if (Selector == TEXT("exhausting")) return Card.Data.bExhaust;
+	if (Selector.StartsWith(TEXT("type:"))) return Card.Data.Type == Selector.Mid(5);
+	if (Selector.StartsWith(TEXT("rarity:"))) return Card.Data.Rarity == Selector.Mid(7);
+	if (Selector.StartsWith(TEXT("cost_at_most:"))) return GetEffectiveCost(Card) <= FCString::Atoi(*Selector.Mid(13));
+	return false;
+}
+
+void UCombatEngine::ExecuteCardZoneEffect(const FCardEffect& Effect)
+{
+	TArray<FCardInstance> LastPlayedSource;
+	TArray<FCardInstance>* SourceZone = nullptr;
+	if (Effect.Source == TEXT("last_played"))
+	{
+		if (!LastPlayedCard.Data.Id.IsEmpty()) LastPlayedSource.Add(LastPlayedCard);
+		SourceZone = &LastPlayedSource;
+	}
+	else SourceZone = ResolveCardZone(Effect.Source);
+	if (!SourceZone) return;
+
+	TArray<int32> Candidates;
+	for (int32 Index = 0; Index < SourceZone->Num(); ++Index)
+	{
+		const FCardInstance& Candidate = (*SourceZone)[Index];
+		if (Candidate.UID == PlayingCardUID || !CardMatchesScriptSelector(Candidate, Effect.Param)) continue;
+		Candidates.Add(Index);
+	}
+	if (Effect.Param == TEXT("highest_cost"))
+		Candidates.Sort([SourceZone](int32 A, int32 B) { return (*SourceZone)[A].GetCost() > (*SourceZone)[B].GetCost(); });
+	else if (Effect.Param == TEXT("lowest_cost"))
+		Candidates.Sort([SourceZone](int32 A, int32 B) { return (*SourceZone)[A].GetCost() < (*SourceZone)[B].GetCost(); });
+	else if (Effect.Param.IsEmpty() || Effect.Param == TEXT("random"))
+		ShuffleArray(Candidates, Rng);
+	const int32 Count = FMath::Min(FMath::Max(1, Effect.Value), Candidates.Num());
+	if (Count <= 0) return;
+
+	if (Effect.Action == TEXT("modify_card_cost"))
+	{
+		for (int32 Pick = 0; Pick < Count; ++Pick)
+			(*SourceZone)[Candidates[Pick]].CostModifier = FMath::Clamp(
+				(*SourceZone)[Candidates[Pick]].CostModifier + Effect.StatusStacks, -9, 9);
+		Log(FString::Printf(TEXT("【%s】修改%d张牌的费用 %+d"), *PendingPowerSourceName, Count, Effect.StatusStacks));
+		return;
+	}
+	if (Effect.Action == TEXT("upgrade_cards"))
+	{
+		for (int32 Pick = 0; Pick < Count; ++Pick) (*SourceZone)[Candidates[Pick]].bUpgraded = true;
+		Log(FString::Printf(TEXT("【%s】在本场强化%d张牌"), *PendingPowerSourceName, Count));
+		return;
+	}
+	if (Effect.Action == TEXT("transform_cards"))
+	{
+		const FCardData* Replacement = CardTable.Find(Effect.Destination);
+		if (!Replacement) return;
+		for (int32 Pick = 0; Pick < Count; ++Pick)
+		{
+			FCardInstance& Card = (*SourceZone)[Candidates[Pick]];
+			Card.Data = *Replacement;
+			Card.bUpgraded = false;
+			Card.CostModifier = 0;
+			Card.RepeatCount = 0;
+		}
+		Log(FString::Printf(TEXT("【%s】将%d张牌变化为【%s】"), *PendingPowerSourceName, Count, *Replacement->Name));
+		return;
+	}
+	if (Effect.Action == TEXT("shuffle_zone"))
+	{
+		ShuffleArray(*SourceZone, Rng);
+		return;
+	}
+
+	TArray<FCardInstance>* DestinationZone = ResolveCardZone(Effect.Destination);
+	if (!DestinationZone) return;
+	TArray<FCardInstance> Selected;
+	for (int32 Pick = 0; Pick < Count; ++Pick) Selected.Add((*SourceZone)[Candidates[Pick]]);
+	if (Effect.Action == TEXT("move_cards") && SourceZone != &LastPlayedSource)
+	{
+		TArray<int32> RemovalIndices;
+		for (int32 Pick = 0; Pick < Count; ++Pick) RemovalIndices.Add(Candidates[Pick]);
+		RemovalIndices.Sort([](int32 A, int32 B) { return A > B; });
+		for (const int32 Index : RemovalIndices) SourceZone->RemoveAt(Index);
+	}
+	else if (Effect.Action == TEXT("copy_cards"))
+	{
+		for (FCardInstance& Card : Selected) Card.UID = NextCardUID++;
+	}
+	for (FCardInstance& Card : Selected)
+	{
+		if (Effect.Destination == TEXT("draw_random"))
+			DestinationZone->Insert(Card, Rng.RandRange(0, DestinationZone->Num()));
+		else DestinationZone->Add(Card);
+	}
+	Log(FString::Printf(TEXT("【%s】%s%d张牌：%s→%s"), *PendingPowerSourceName,
+		Effect.Action == TEXT("copy_cards") ? TEXT("复制") : TEXT("移动"), Count,
+		*Effect.Source, *Effect.Destination));
+}
+
+void UCombatEngine::TriggerCardRules(const FString& Trigger, int32& EventValue, int32 TargetEnemyIndex,
+	const FString& EventTag)
+{
+	if (ScriptEventDepth >= 12)
+	{
+		Log(FString::Printf(TEXT("原创规则递归超过安全上限，已停止：%s"), *Trigger));
+		return;
+	}
+	++ScriptEventDepth;
+	const int32 PreviousEventValue = CurrentScriptEventValue;
+	const FString PreviousEventTag = CurrentScriptEventTag;
+	CurrentScriptEventValue = EventValue;
+	CurrentScriptEventTag = EventTag;
+	for (FActiveCardRule& Rule : ActiveCardRules)
+	{
+		if (Rule.Effect.Trigger != Trigger) continue;
+		if (Rule.Effect.MaxTriggers > 0 && Rule.TriggerCount >= Rule.Effect.MaxTriggers) continue;
+		if (!ShouldExecuteEffect(Rule.Effect, nullptr, TargetEnemyIndex)) continue;
+		++Rule.TriggerCount;
+		if (Rule.Effect.Action == TEXT("transfer"))
+		{
+			const int32 SourceValue = ReadScriptValue(Rule.Effect.Source, TargetEnemyIndex);
+			const int32 Factor = Rule.Effect.ScaleFactor == 0 ? 1 : Rule.Effect.ScaleFactor;
+			const int32 Amount = Rule.Effect.Value
+				+ (SourceValue / FMath::Max(1, Rule.Effect.ScaleDivisor)) * Factor;
+			WriteScriptValue(Rule.Effect.Destination, Amount, Rule.Effect.WriteMode, TargetEnemyIndex, Rule.SourceName);
+			if (Rule.Effect.bConsumeSource)
+			{
+				if (Rule.Effect.Source == TEXT("event_value")) EventValue = 0;
+				else WriteScriptValue(Rule.Effect.Source, 0, TEXT("set"), TargetEnemyIndex, Rule.SourceName);
+			}
+			Log(FString::Printf(TEXT("【%s】转化规则生效：%d"), *Rule.SourceName, Amount));
+		}
+		else
+		{
+			FCardEffect Executable = Rule.Effect;
+			Executable.Trigger = TEXT("on_play");
+			const FString PreviousSourceName = PendingPowerSourceName;
+			PendingPowerSourceName = Rule.SourceName;
+			ExecuteEffect(Executable, TargetEnemyIndex, true, nullptr);
+			PendingPowerSourceName = PreviousSourceName;
+		}
+		CurrentScriptEventValue = EventValue;
+	}
+	CurrentScriptEventValue = PreviousEventValue;
+	CurrentScriptEventTag = PreviousEventTag;
+	--ScriptEventDepth;
+	if (ScriptEventDepth == 0)
+	{
+		ActiveCardRules.RemoveAll([](const FActiveCardRule& Rule)
+		{
+			return Rule.Effect.MaxTriggers > 0 && Rule.TriggerCount >= Rule.Effect.MaxTriggers;
+		});
+	}
+}
+
+int32 UCombatEngine::ResolveEffectValue(const FCardEffect& Effect, const FCardInstance* Card, int32 TargetEnemyIndex) const
+{
+	int32 SourceValue = 0;
+	const FString& Source = Effect.ScaleBy;
+	if (Source == TEXT("counter")) SourceValue = Card ? Card->RepeatCount : 0;
+	else if (Source == TEXT("self_block")) SourceValue = Player.Block;
+	else if (Source == TEXT("missing_hp")) SourceValue = FMath::Max(0, Player.MaxHP - Player.HP);
+	else if (Source == TEXT("hand_size")) SourceValue = Hand.Num();
+	else if (Source == TEXT("draw_pile")) SourceValue = DrawPile.Num();
+	else if (Source == TEXT("discard_pile")) SourceValue = DiscardPile.Num();
+	else if (Source == TEXT("cards_played_this_turn")) SourceValue = CardsPlayedThisTurn;
+	else if (Source == TEXT("basic_gongfa_played")) SourceValue = BasicGongfaPlayedThisCombat;
+	else if (Source == TEXT("event_value")) SourceValue = CurrentScriptEventValue;
+	else if (Source == TEXT("turn")) SourceValue = TurnCount;
+	else if (Source == TEXT("enemy_count")) SourceValue = GetAliveEnemyIndices().Num();
+	else if (Source == TEXT("self_hp")) SourceValue = Player.HP;
+	else if (Source == TEXT("self_spirit")) SourceValue = Spirit;
+	else if (Source == TEXT("exhaust_pile")) SourceValue = ExhaustPile.Num();
+	else if (Source == TEXT("last_card_cost")) SourceValue = LastPlayedCard.Data.Id.IsEmpty() ? 0 : GetEffectiveCost(LastPlayedCard);
+	else if (Source == TEXT("target_hp") && Enemies.IsValidIndex(TargetEnemyIndex)) SourceValue = Enemies[TargetEnemyIndex].State.HP;
+	else if (Source == TEXT("target_missing_hp") && Enemies.IsValidIndex(TargetEnemyIndex))
+		SourceValue = FMath::Max(0, Enemies[TargetEnemyIndex].State.MaxHP - Enemies[TargetEnemyIndex].State.HP);
+	else if (Source == TEXT("target_block") && Enemies.IsValidIndex(TargetEnemyIndex)) SourceValue = Enemies[TargetEnemyIndex].State.Block;
+	else if (Source.StartsWith(TEXT("var:"))) SourceValue = ScriptVariables.FindRef(Source.Mid(4));
+	else if (Source.StartsWith(TEXT("self_status:"))) SourceValue = Player.GetStatusStacks(Source.Mid(12));
+	else if (Source.StartsWith(TEXT("target_status:")) && Enemies.IsValidIndex(TargetEnemyIndex))
+		SourceValue = Enemies[TargetEnemyIndex].State.GetStatusStacks(Source.Mid(14));
+
+	const int32 Divisor = FMath::Max(1, Effect.ScaleDivisor);
+	return Effect.Value + (SourceValue / Divisor) * Effect.ScaleFactor;
+}
+
+bool UCombatEngine::ShouldExecuteEffect(const FCardEffect& Effect, const FCardInstance* Card, int32 TargetEnemyIndex)
+{
+	if (Effect.Chance <= 0.f || (Effect.Chance < 1.f && Rng.FRand() > Effect.Chance)) return false;
+	const FString& C = Effect.Condition;
+	if (C.IsEmpty() || C == TEXT("always")) return true;
+
+	auto EvaluateAtom = [this, Card, TargetEnemyIndex](FString Atom) -> bool
+	{
+		Atom.TrimStartAndEndInline();
+		if (Atom.IsEmpty() || Atom == TEXT("always")) return true;
+		auto NumberAfterColon = [&Atom]() -> int32
+		{
+			int32 Colon = INDEX_NONE;
+			return Atom.FindChar(TEXT(':'), Colon) ? FCString::Atoi(*Atom.Mid(Colon + 1)) : 0;
+		};
+		if (Atom.StartsWith(TEXT("self_hp_below:"))) return Player.HP * 100 < Player.MaxHP * NumberAfterColon();
+		if (Atom.StartsWith(TEXT("self_hp_above:"))) return Player.HP * 100 > Player.MaxHP * NumberAfterColon();
+		if (Atom.StartsWith(TEXT("self_has_status:"))) return Player.GetStatusStacks(Atom.Mid(16)) > 0;
+		if (Atom.StartsWith(TEXT("self_missing_status:"))) return Player.GetStatusStacks(Atom.Mid(20)) <= 0;
+		if (Atom.StartsWith(TEXT("target_has_status:"))) return Enemies.IsValidIndex(TargetEnemyIndex)
+			&& Enemies[TargetEnemyIndex].State.GetStatusStacks(Atom.Mid(18)) > 0;
+		if (Atom.StartsWith(TEXT("target_missing_status:"))) return Enemies.IsValidIndex(TargetEnemyIndex)
+			&& Enemies[TargetEnemyIndex].State.GetStatusStacks(Atom.Mid(22)) <= 0;
+		if (Atom.StartsWith(TEXT("counter_at_least:"))) return Card && Card->RepeatCount >= NumberAfterColon();
+		if (Atom.StartsWith(TEXT("hand_size_at_least:"))) return Hand.Num() >= NumberAfterColon();
+		if (Atom.StartsWith(TEXT("draw_pile_at_most:"))) return DrawPile.Num() <= NumberAfterColon();
+		if (Atom.StartsWith(TEXT("discard_pile_at_least:"))) return DiscardPile.Num() >= NumberAfterColon();
+		if (Atom.StartsWith(TEXT("event_tag_is:"))) return CurrentScriptEventTag == Atom.Mid(13);
+		static const TArray<FString> ComparePrefixes = {
+			TEXT("source_at_least:"), TEXT("source_at_most:"), TEXT("source_equals:")
+		};
+		for (const FString& Prefix : ComparePrefixes)
+		{
+			if (!Atom.StartsWith(Prefix)) continue;
+			const FString Comparison = Atom.Mid(Prefix.Len());
+			int32 Separator = INDEX_NONE;
+			if (!Comparison.FindLastChar(TEXT('='), Separator) || Separator <= 0) return false;
+			const int32 Actual = ReadScriptValue(Comparison.Left(Separator), TargetEnemyIndex);
+			const int32 Expected = FCString::Atoi(*Comparison.Mid(Separator + 1));
+			if (Prefix == TEXT("source_at_least:")) return Actual >= Expected;
+			if (Prefix == TEXT("source_at_most:")) return Actual <= Expected;
+			return Actual == Expected;
+		}
+		return false;
+	};
+
+	TArray<FString> OrGroups;
+	C.ParseIntoArray(OrGroups, TEXT("||"), true);
+	for (const FString& Group : OrGroups)
+	{
+		TArray<FString> AndTerms;
+		Group.ParseIntoArray(AndTerms, TEXT("&&"), true);
+		bool bAll = AndTerms.Num() > 0;
+		for (const FString& Term : AndTerms) bAll = bAll && EvaluateAtom(Term);
+		if (bAll) return true;
+	}
+	Log(FString::Printf(TEXT("原创规则条件不满足: %s"), *C));
+	return false;
+}
+
 void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIndex, bool bFromPlayer, const FCardInstance* Card)
 {
+	if (!ShouldExecuteEffect(Effect, Card, TargetEnemyIndex)) return;
 	const FString& A = Effect.Action;
+	const int32 V = ResolveEffectValue(Effect, Card, TargetEnemyIndex);
 
 	if (A == TEXT("damage"))
 	{
-		for (int32 t = 0; t < Effect.Times; ++t) DealDamageToEnemy(Effect.Value, TargetEnemyIndex, TEXT("卡牌"));
+		for (int32 t = 0; t < Effect.Times; ++t) DealDamageToEnemy(V, TargetEnemyIndex, TEXT("卡牌"));
 	}
 	else if (A == TEXT("damage_all"))
 	{
-		for (int32 Idx : GetAliveEnemyIndices()) DealDamageToEnemy(Effect.Value, Idx, TEXT("卡牌"));
+		for (int32 Idx : GetAliveEnemyIndices()) DealDamageToEnemy(V, Idx, TEXT("卡牌"));
 	}
 	else if (A == TEXT("damage_all_per_repeat"))
 	{
@@ -764,7 +1325,7 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 		if (Card) Log(FString::Printf(TEXT("【%s】牵引 %d 道剑痕"), *Card->GetDisplayName(), Rpt));
 		for (int32 t = 0; t < Rpt; ++t)
 		{
-			for (int32 Idx : GetAliveEnemyIndices()) DealDamageToEnemy(Effect.Value, Idx, TEXT("卡牌"));
+			for (int32 Idx : GetAliveEnemyIndices()) DealDamageToEnemy(V, Idx, TEXT("卡牌"));
 		}
 	}
 	else if (A == TEXT("damage_random"))
@@ -773,26 +1334,36 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 		{
 			TArray<int32> Alive = GetAliveEnemyIndices();
 			if (Alive.Num() == 0) break;
-			DealDamageToEnemy(Effect.Value, Alive[Rng.RandRange(0, Alive.Num() - 1)], TEXT("卡牌"));
+			DealDamageToEnemy(V, Alive[Rng.RandRange(0, Alive.Num() - 1)], TEXT("卡牌"));
 		}
 	}
 	else if (A == TEXT("block"))
 	{
-		ApplyBlock(Player, Effect.Value);
+		ApplyBlock(Player, V);
 	}
 	else if (A == TEXT("draw"))
 	{
-		DrawCards(Effect.Value);
-		Log(FString::Printf(TEXT("抽 %d 张牌"), Effect.Value));
+		DrawCards(V);
+		Log(FString::Printf(TEXT("抽 %d 张牌"), V));
+	}
+	else if (A == TEXT("discover_draw"))
+	{
+		BeginDiscoverFromDrawPile(V);
 	}
 	else if (A == TEXT("gain_spirit"))
 	{
-		Spirit += Effect.Value;
-		Log(FString::Printf(TEXT("获得 %d 点灵力 (当前 %d)"), Effect.Value, Spirit));
+		Spirit += V;
+		Log(FString::Printf(TEXT("获得 %d 点灵力 (当前 %d)"), V, Spirit));
+	}
+	else if (A == TEXT("lose_spirit"))
+	{
+		const int32 Lost = FMath::Min(FMath::Max(0, V), Spirit);
+		Spirit -= Lost;
+		Log(FString::Printf(TEXT("失去 %d 点灵力 (当前 %d)"), Lost, Spirit));
 	}
 	else if (A == TEXT("heal"))
 	{
-		int32 Healed = FMath::Min(Effect.Value, Player.MaxHP - Player.HP);
+		int32 Healed = FMath::Min(V, Player.MaxHP - Player.HP);
 		Player.HP += Healed;
 		Log(FString::Printf(TEXT("恢复 %d 点气血 (HP %d/%d)"), Healed, Player.HP, Player.MaxHP));
 	}
@@ -800,8 +1371,28 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 	{
 		if (Effect.Target == TEXT("self"))
 			ApplyStatusTo(Player, Effect.StatusId, Effect.StatusStacks, TEXT("卡牌"));
+		else if (Effect.Target == TEXT("all_enemies"))
+			for (int32 Idx : GetAliveEnemyIndices()) ApplyStatusTo(Enemies[Idx].State, Effect.StatusId, Effect.StatusStacks, TEXT("卡牌"));
+		else if (Effect.Target == TEXT("random_enemy"))
+		{
+			const TArray<int32> Alive = GetAliveEnemyIndices();
+			if (Alive.Num() > 0) ApplyStatusTo(Enemies[Alive[Rng.RandRange(0, Alive.Num() - 1)]].State, Effect.StatusId, Effect.StatusStacks, TEXT("卡牌"));
+		}
 		else if (Enemies.IsValidIndex(TargetEnemyIndex))
 			ApplyStatusTo(Enemies[TargetEnemyIndex].State, Effect.StatusId, Effect.StatusStacks, TEXT("卡牌"));
+	}
+	else if (A == TEXT("remove_status") || A == TEXT("set_status"))
+	{
+		auto ModifyStatus = [&](FCombatantState& Target)
+		{
+			const int32 Amount = Effect.StatusStacks != 0 ? Effect.StatusStacks : V;
+			const int32 Current = Target.GetStatusStacks(Effect.StatusId);
+			const int32 Delta = A == TEXT("set_status") ? Amount - Current : -FMath::Abs(Amount);
+			Target.AddStatus(Effect.StatusId, Delta);
+		};
+		if (Effect.Target == TEXT("self")) ModifyStatus(Player);
+		else if (Effect.Target == TEXT("all_enemies")) for (int32 Idx : GetAliveEnemyIndices()) ModifyStatus(Enemies[Idx].State);
+		else if (Enemies.IsValidIndex(TargetEnemyIndex)) ModifyStatus(Enemies[TargetEnemyIndex].State);
 	}
 	else if (A == TEXT("apply_temp_strength"))
 	{
@@ -809,8 +1400,15 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 	}
 	else if (A == TEXT("gain_gold"))
 	{
-		Gold += Effect.Value;
-		Log(FString::Printf(TEXT("获得 %d 枚灵石 (共 %d)"), Effect.Value, Gold));
+		Gold += V;
+		Log(FString::Printf(TEXT("获得 %d 枚灵石 (共 %d)"), V, Gold));
+	}
+	else if (A == TEXT("gain_max_hp"))
+	{
+		const int32 Gain = FMath::Max(0, V);
+		Player.MaxHP += Gain;
+		Player.HP += Gain;
+		Log(FString::Printf(TEXT("最大气血 +%d (HP %d/%d)"), Gain, Player.HP, Player.MaxHP));
 	}
 	else if (A == TEXT("cleanse_toxicity"))
 	{
@@ -820,26 +1418,61 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 	else if (A == TEXT("damage_per_block"))
 	{
 		// 罡气共鸣: 造成 Value + 当前护体罡气 的伤害
-		DealDamageToEnemy(Effect.Value + Player.Block, TargetEnemyIndex, TEXT("卡牌"));
+		DealDamageToEnemy(V + Player.Block, TargetEnemyIndex, TEXT("卡牌"));
 	}
 	else if (A == TEXT("discard_random"))
 	{
-		DiscardRandomCards(Effect.Value);
+		DiscardRandomCards(V);
+	}
+	else if (A == TEXT("discard_hand"))
+	{
+		int32 Discarded = 0;
+		for (int32 Index = Hand.Num() - 1; Index >= 0; --Index)
+		{
+			if (Hand[Index].UID == PlayingCardUID || Hand[Index].Data.bRetain) continue;
+			Hand[Index].RepeatCount = 0;
+			DiscardPile.Add(Hand[Index]);
+			Hand.RemoveAt(Index);
+			Discarded++;
+		}
+		if (Discarded > 0)
+		{
+			TriggerRelicsWithValue(TEXT("on_cards_discarded"), Discarded);
+			int32 DiscardEventValue = Discarded;
+			TriggerCardRules(TEXT("on_discard"), DiscardEventValue);
+		}
 	}
 	else if (A == TEXT("spirit_next_turn"))
 	{
-		SpiritCarryOver += Effect.Value;
-		Log(FString::Printf(TEXT("封存灵气: 下回合额外获得 %d 点灵力"), Effect.Value));
+		SpiritCarryOver += V;
+		Log(FString::Printf(TEXT("封存灵气: 下回合额外获得 %d 点灵力"), V));
 	}
-	else if (A == TEXT("self_damage"))
+	else if (A == TEXT("self_damage") || A == TEXT("damage_self"))
 	{
 		// 以血为引: 失去气血（不致死，无视罡气）
-		const int32 Loss = FMath::Min(Effect.Value, Player.HP - 1);
+		const int32 Loss = FMath::Min(V, Player.HP - 1);
 		if (Loss > 0)
 		{
 			Player.HP -= Loss;
 			Log(FString::Printf(TEXT("你失去 %d 点气血 (HP %d/%d)"), Loss, Player.HP, Player.MaxHP));
 		}
+	}
+	else if (A == TEXT("create_card") || A == TEXT("add_card_to_draw") || A == TEXT("add_card_to_discard"))
+	{
+		const int32 Count = FMath::Max(1, V);
+		for (int32 Index = 0; Index < Count; ++Index)
+		{
+			FCardInstance Created = MakeCard(Effect.Param);
+			if (Created.Data.Id.IsEmpty())
+			{
+				Log(FString::Printf(TEXT("无法生成未知卡牌: %s"), *Effect.Param));
+				break;
+			}
+			if (A == TEXT("create_card")) Hand.Add(Created);
+			else if (A == TEXT("add_card_to_draw")) DrawPile.Insert(Created, Rng.RandRange(0, DrawPile.Num()));
+			else DiscardPile.Add(Created);
+		}
+		Log(FString::Printf(TEXT("生成 %d 张【%s】"), Count, *Effect.Param));
 	}
 	else if (A == TEXT("power"))
 	{
@@ -848,14 +1481,15 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 		AddPower(Effect.StatusId, PendingPowerSourceName);
 		if (Effect.StatusId == TEXT("counter_stance") || Effect.StatusId == TEXT("thorns_aura"))
 		{
-			CounterDamage = FMath::Max(CounterDamage, Effect.Value);
+			// 每个反震功法实例都保留自己的伤害，多个同名实例按总和叠加。
+			CounterDamage += V;
 		}
 	}
 	else if (A == TEXT("damage_per_status"))
 	{
 		// 剑意爆发: 造成 Value + 目标状态层数 × StatusStacks 的伤害（读取自身剑意）
 		const int32 Stacks = Player.GetStatusStacks(Effect.StatusId);
-		DealDamageToEnemy(Effect.Value + Stacks * Effect.StatusStacks, TargetEnemyIndex, TEXT("卡牌"));
+		DealDamageToEnemy(V + Stacks * Effect.StatusStacks, TargetEnemyIndex, TEXT("卡牌"));
 	}
 	else if (A == TEXT("damage_all_per_basic_gongfa"))
 	{
@@ -866,7 +1500,7 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 			Log(FString::Printf(TEXT("万剑朝宗: 牵引 %d 道剑痕"), Count));
 			for (int32 t = 0; t < Count; ++t)
 			{
-				for (int32 Idx : GetAliveEnemyIndices()) DealDamageToEnemy(Effect.Value, Idx, TEXT("卡牌"));
+				for (int32 Idx : GetAliveEnemyIndices()) DealDamageToEnemy(V, Idx, TEXT("卡牌"));
 			}
 		}
 	}
@@ -876,7 +1510,7 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 		const int32 Stacks = Player.GetStatusStacks(Effect.StatusId);
 		for (int32 Idx : GetAliveEnemyIndices())
 		{
-			DealDamageToEnemy(Effect.Value + Stacks * Effect.StatusStacks, Idx, TEXT("卡牌"));
+			DealDamageToEnemy(V + Stacks * Effect.StatusStacks, Idx, TEXT("卡牌"));
 		}
 	}
 	else if (A == TEXT("cost_free_basic_gongfa"))
@@ -888,7 +1522,7 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 	{
 		// 防守反击: 获得 Value + 自身状态层数 × StatusStacks 的罡气
 		const int32 Stacks = Player.GetStatusStacks(Effect.StatusId);
-		ApplyBlock(Player, Effect.Value + Stacks * Effect.StatusStacks);
+		ApplyBlock(Player, V + Stacks * Effect.StatusStacks);
 	}
 	else if (A == TEXT("amplify_status"))
 	{
@@ -901,7 +1535,7 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 			const int32 Cur = Tgt->GetStatusStacks(Effect.StatusId);
 			if (Cur > 0)
 			{
-				ApplyStatusTo(*Tgt, Effect.StatusId, Cur * FMath::Max(1, Effect.Value - 1), TEXT("卡牌"));
+				ApplyStatusTo(*Tgt, Effect.StatusId, Cur * FMath::Max(1, V - 1), TEXT("卡牌"));
 			}
 			else if (Effect.StatusStacks > 0)
 			{
@@ -911,13 +1545,13 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 	}
 	else if (A == TEXT("enhance_one_sword"))
 	{
-		OneSwordEnhance += Effect.Value;
-		Log(FString::Printf(TEXT("强化【一剑】+%d (当前强化 %d)"), Effect.Value, OneSwordEnhance));
+		OneSwordEnhance += V;
+		Log(FString::Printf(TEXT("强化【一剑】+%d (当前强化 %d)"), V, OneSwordEnhance));
 		EnsureOneSwordInHand();
 	}
 	else if (A == TEXT("one_sword_strike"))
 	{
-		const int32 BaseDmg = Effect.Value;
+		const int32 BaseDmg = V;
 		const int32 TotalDmg = BaseDmg + OneSwordEnhance * 6;
 		const int32 Reps = bOneSwordMultipliedThisTurn ? 2 : 1;
 		Log(FString::Printf(TEXT("【一剑】! 基础 %d + 强化 %d×6 = %d 伤害%s"),
@@ -939,12 +1573,12 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 	}
 	else if (A == TEXT("next_zhaoshi_cost_reduce"))
 	{
-		NextZhaoshiCostReduce = FMath::Max(NextZhaoshiCostReduce, Effect.Value);
-		Log(FString::Printf(TEXT("本回合下一张招式费用-%d"), Effect.Value));
+		NextZhaoshiCostReduce = FMath::Max(NextZhaoshiCostReduce, V);
+		Log(FString::Printf(TEXT("本回合下一张招式费用-%d"), V));
 	}
 	else if (A == TEXT("wan_jian_damage"))
 	{
-		const int32 Base = Effect.Value;
+		const int32 Base = V;
 		const int32 Bonus = Card ? Card->RepeatCount * Effect.StatusStacks : 0;
 		const int32 Total = Base + Bonus;
 		for (int32 Idx : GetAliveEnemyIndices())
@@ -954,11 +1588,27 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 	else if (A == TEXT("defense_to_strength"))
 	{
 		// 以守为攻: 若本回合获得过护甲则获得双倍力量
-		const int32 BaseStr = Effect.Value; // 3
+		const int32 BaseStr = V; // 3
 		const int32 BonusStr = Effect.StatusStacks; // 3
 		const int32 TotalStr = bGotBlockThisTurn ? (BaseStr + BonusStr) : BaseStr;
 		Log(FString::Printf(TEXT("以守为攻: 获得 %d 层力量%s"), TotalStr, bGotBlockThisTurn ? TEXT(" (守转攻!)") : TEXT("")));
 		ApplyStatusTo(Player, TEXT("strength"), TotalStr, TEXT("以守为攻"));
+	}
+	else if (A == TEXT("move_cards") || A == TEXT("copy_cards") || A == TEXT("modify_card_cost")
+		|| A == TEXT("upgrade_cards") || A == TEXT("transform_cards") || A == TEXT("shuffle_zone"))
+	{
+		ExecuteCardZoneEffect(Effect);
+	}
+	else if (A == TEXT("transfer"))
+	{
+		const int32 SourceValue = ReadScriptValue(Effect.Source, TargetEnemyIndex);
+		const int32 Factor = Effect.ScaleFactor == 0 ? 1 : Effect.ScaleFactor;
+		const int32 Amount = Effect.Value
+			+ (SourceValue / FMath::Max(1, Effect.ScaleDivisor)) * Factor;
+		WriteScriptValue(Effect.Destination, Amount, Effect.WriteMode, TargetEnemyIndex,
+			PendingPowerSourceName.IsEmpty() ? TEXT("原创卡") : PendingPowerSourceName);
+		if (Effect.bConsumeSource)
+			WriteScriptValue(Effect.Source, 0, TEXT("set"), TargetEnemyIndex, PendingPowerSourceName);
 	}
 }
 
@@ -982,7 +1632,9 @@ void UCombatEngine::DealDamageToEnemy(int32 Amount, int32 EnemyIndex, const FStr
 	FEnemyCombatant& E = Enemies[EnemyIndex];
 	if (!E.State.IsAlive()) return;
 
-	const int32 Dmg = CalcAttackDamage(Amount, Player, E.State);
+	int32 EffectiveAmount = FMath::Max(0, Amount);
+	TriggerCardRules(TEXT("before_deal_damage"), EffectiveAmount, EnemyIndex, E.Data.Tier);
+	const int32 Dmg = CalcAttackDamage(EffectiveAmount, Player, E.State);
 	const int32 Absorbed = FMath::Min(E.State.Block, Dmg);
 	E.State.Block -= Absorbed;
 	E.State.HP -= (Dmg - Absorbed);
@@ -991,24 +1643,42 @@ void UCombatEngine::DealDamageToEnemy(int32 Amount, int32 EnemyIndex, const FStr
 		*E.State.Name, Dmg, Absorbed, FMath::Max(0, E.State.HP), E.State.MaxHP));
 
 	TriggerRelicsWithValue(TEXT("on_damage_dealt"), Dmg);
+	int32 DamageEventValue = FMath::Max(0, Dmg - Absorbed);
+	TriggerCardRules(TEXT("on_damage_dealt"), DamageEventValue, EnemyIndex);
+	if (Dmg > 0) IncrementHandCounters(TEXT("on_damage_dealt"));
+
+	// ---- 受击机制 ----
+	// 反噬必须在击杀判定前结算：致命攻击同样属于“受到攻击”，不能因为
+	// 下面的击杀提前返回而漏掉反噬。仅在实际造成伤害时触发，避免无效
+	// 的零伤害效果凭空扣血。
+	const int32 ThornsN = GetEnemyAbilityValue(E.Data, TEXT("thorns"));
+	if (ThornsN > 0 && Dmg > 0 && Player.IsAlive())
+	{
+		// 反噬是固定数值伤害，但仍属于对玩家的伤害，必须先由罡气吸收；
+		// 不直接调用 DealDamageToPlayer，避免把反噬误判为敌方攻击并触发
+		// 反击功法，形成“反噬 -> 反击 -> 反噬”的递归链。
+		const int32 ThornsAbsorbed = FMath::Min(Player.Block, ThornsN);
+		Player.Block -= ThornsAbsorbed;
+		const int32 ThornsHPDamage = ThornsN - ThornsAbsorbed;
+		Player.HP = FMath::Max(0, Player.HP - ThornsHPDamage);
+		TriggerRelicsWithValue(TEXT("on_hp_changed"), ThornsHPDamage);
+		Log(FString::Printf(TEXT("  %s 的反噬: 你受到 %d 点反噬伤害 (罡气抵挡 %d, HP %d/%d)"),
+			*E.State.Name, ThornsN, ThornsAbsorbed, FMath::Max(0, Player.HP), Player.MaxHP));
+		if (!Player.IsAlive())
+		{
+			CheckCombatEnd();
+		}
+	}
 
 	if (E.State.HP <= 0)
 	{
 		E.State.HP = 0;
 		Log(FString::Printf(TEXT("  %s 被击杀!"), *E.State.Name));
 		TriggerRelics(TEXT("on_kill"));
+		int32 KillEventValue = 1;
+		TriggerCardRules(TEXT("on_kill"), KillEventValue, EnemyIndex, E.Data.Tier);
 		RefreshHandLimit();
 		return;
-	}
-
-	// ---- 受击机制 ----
-	// 反噬（thorns）: 受到攻击时对攻击者反噬
-	const int32 ThornsN = GetEnemyAbilityValue(E.Data, TEXT("thorns"));
-	if (ThornsN > 0 && Player.IsAlive())
-	{
-		Player.HP = FMath::Max(0, Player.HP - ThornsN);
-		Log(FString::Printf(TEXT("  %s 的尸毒反噬: 你受到 %d 点反噬伤害 (HP %d/%d)"),
-			*E.State.Name, ThornsN, FMath::Max(0, Player.HP), Player.MaxHP));
 	}
 
 	// 魇梦蝶: 攻击它额外获得1层梦魇
@@ -1041,7 +1711,9 @@ void UCombatEngine::DealDamageToEnemy(int32 Amount, int32 EnemyIndex, const FStr
 
 void UCombatEngine::DealDamageToPlayer(int32 Amount, FCombatantState& Attacker, const FString& SourceName)
 {
-	int32 Dmg = CalcAttackDamage(Amount, Attacker, Player);
+	int32 EffectiveAmount = FMath::Max(0, Amount);
+	TriggerCardRules(TEXT("before_take_damage"), EffectiveAmount);
+	int32 Dmg = CalcAttackDamage(EffectiveAmount, Attacker, Player);
 
 	// 首次受伤减免法器（如玄龟护心镜: 每回合首次受到的攻击伤害减半）
 	if (!bPlayerAttackedThisTurn && Dmg > 0)
@@ -1065,13 +1737,21 @@ void UCombatEngine::DealDamageToPlayer(int32 Amount, FCombatantState& Attacker, 
 		Dmg, Absorbed, FMath::Max(0, Player.HP), Player.MaxHP));
 
 	TriggerRelicsWithValue(TEXT("on_hp_changed"), Dmg - Absorbed);
+	int32 DamageEventValue = FMath::Max(0, Dmg - Absorbed);
+	TriggerCardRules(TEXT("on_damage_taken"), DamageEventValue);
 
 	// 功法「听劲反击诀」/「罡气反震」: 受到攻击后反击攻击者
-	if (CounterDamage > 0 && bCombatActive && Player.IsAlive())
-	{
-		FString PowerName;
-		if (HasPower(TEXT("counter_stance"))) PowerName = TEXT("听劲反击诀");
-		else if (HasPower(TEXT("thorns_aura"))) PowerName = TEXT("罡气反震");
+		if (CounterDamage > 0 && bCombatActive && Player.IsAlive())
+		{
+			FString PowerName;
+			const int32 CounterStanceCount = GetPowerCount(TEXT("counter_stance"));
+			const int32 ThornsAuraCount = GetPowerCount(TEXT("thorns_aura"));
+			if (CounterStanceCount > 0 && ThornsAuraCount > 0)
+				PowerName = TEXT("听劲反击诀 / 罡气反震");
+			else if (CounterStanceCount > 0)
+				PowerName = TEXT("听劲反击诀");
+			else if (ThornsAuraCount > 0)
+				PowerName = TEXT("罡气反震");
 		if (!PowerName.IsEmpty())
 		{
 			for (int32 i = 0; i < Enemies.Num(); ++i)
@@ -1094,9 +1774,18 @@ void UCombatEngine::DealDamageToPlayer(int32 Amount, FCombatantState& Attacker, 
 
 void UCombatEngine::ApplyBlock(FCombatantState& Target, int32 Amount)
 {
-	if (&Target == &Player && Amount > 0) bGotBlockThisTurn = true;
-	Target.Block += Amount;
-	Log(FString::Printf(TEXT("  %s 获得 %d 点护体罡气 (共 %d)"), *Target.Name, Amount, Target.Block));
+	int32 EffectiveAmount = Amount;
+	if (&Target == &Player && EffectiveAmount > 0)
+		TriggerCardRules(TEXT("before_gain_block"), EffectiveAmount);
+	if (EffectiveAmount <= 0) return;
+	if (&Target == &Player) bGotBlockThisTurn = true;
+	Target.Block += EffectiveAmount;
+	Log(FString::Printf(TEXT("  %s 获得 %d 点护体罡气 (共 %d)"), *Target.Name, EffectiveAmount, Target.Block));
+	if (&Target == &Player)
+	{
+		int32 AppliedAmount = EffectiveAmount;
+		TriggerCardRules(TEXT("after_gain_block"), AppliedAmount);
+	}
 }
 
 void UCombatEngine::ApplyTempStrength(FCombatantState& Target, int32 Stacks, const FString& SourceName)
@@ -1123,11 +1812,18 @@ void UCombatEngine::ApplyStatusTo(FCombatantState& Target, const FString& Status
 		if (Bonus != 0) Stacks = FMath::Max(1, Stacks + Bonus);
 	}
 
-	// 功法「双刃剑意诀」: 力量获取翻倍
-	if (Stacks > 0 && StatusId == TEXT("strength") && &Target == &Player && HasPower(TEXT("double_strength")))
+	// 功法「双刃剑意诀」: 每个独立实例各翻倍一次，两个实例即为四倍。
+	const int32 DoubleStrengthCount = GetPowerCount(TEXT("double_strength"));
+	if (Stacks > 0 && StatusId == TEXT("strength") && &Target == &Player && DoubleStrengthCount > 0)
 	{
-		Stacks *= 2;
-		Log(TEXT("功法【双刃剑意诀】运转: 力量获取翻倍"));
+		int32 Multiplier = 1;
+		for (int32 InstanceIndex = 0; InstanceIndex < DoubleStrengthCount; ++InstanceIndex)
+		{
+			Stacks = Stacks > MAX_int32 / 2 ? MAX_int32 : Stacks * 2;
+			Multiplier = FMath::Clamp(Multiplier * 2, 1, MAX_int32);
+		}
+		Log(FString::Printf(TEXT("功法【双刃剑意诀】%d 重运转: 力量获取变为%d倍"),
+			DoubleStrengthCount, Multiplier));
 	}
 
 	// 记录本集是否获得过力量/护甲（供双刃剑意诀/以守为攻检测）
@@ -1137,6 +1833,16 @@ void UCombatEngine::ApplyStatusTo(FCombatantState& Target, const FString& Status
 	}
 
 	Target.AddStatus(StatusId, Stacks);
+	if (Stacks != 0)
+	{
+		int32 StatusEventValue = FMath::Abs(Stacks);
+		int32 TargetEnemyIndex = INDEX_NONE;
+		for (int32 Index = 0; Index < Enemies.Num(); ++Index)
+		{
+			if (&Enemies[Index].State == &Target) { TargetEnemyIndex = Index; break; }
+		}
+		TriggerCardRules(TEXT("on_status_applied"), StatusEventValue, TargetEnemyIndex, StatusId);
+	}
 
 	static const TMap<FString, FString> StatusNames = {
 		{TEXT("burn"), TEXT("灼烧")}, {TEXT("poison"), TEXT("中毒")},
@@ -1320,6 +2026,8 @@ void UCombatEngine::DiscardRandomCards(int32 Count)
 	if (Discarded > 0)
 	{
 		TriggerRelicsWithValue(TEXT("on_cards_discarded"), Discarded);
+		int32 DiscardEventValue = Discarded;
+		TriggerCardRules(TEXT("on_discard"), DiscardEventValue);
 	}
 }
 
@@ -1441,6 +2149,10 @@ void UCombatEngine::EnsureOneSwordInHand()
 
 void UCombatEngine::ResetTurnState()
 {
+	ActiveCardRules.RemoveAll([](const FActiveCardRule& Rule)
+	{
+		return Rule.Effect.Duration == TEXT("turn");
+	});
 	bOneSwordMultipliedThisTurn = false;
 	bOneSwordFreeThisTurn = false;
 	NextZhaoshiCostReduce = 0;

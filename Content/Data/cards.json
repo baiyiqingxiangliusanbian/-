@@ -37,6 +37,14 @@
           }
         ]
       },
+      "visual": {
+        "animation": "slash",
+        "sound": "sword_slash",
+        "accent": "#EAF7FF",
+        "duration": 0.34,
+        "intensity": 3,
+        "count": 1
+      },
       "art": "Art/cards/strike.png"
     },
     {
@@ -64,6 +72,14 @@
             "target": "self"
           }
         ]
+      },
+      "visual": {
+        "animation": "block",
+        "sound": "block",
+        "accent": "#66B8FF",
+        "duration": 0.42,
+        "intensity": 1,
+        "count": 1
       },
       "art": "Art/cards/defend.png"
     },
@@ -538,6 +554,14 @@
           }
         ]
       },
+      "visual": {
+        "animation": "fireball",
+        "sound": "fireball",
+        "accent": "#FF7A28",
+        "duration": 0.48,
+        "intensity": 6,
+        "count": 1
+      },
       "art": "Art/cards/fireball.png"
     },
     {
@@ -577,6 +601,14 @@
             "target": "enemy"
           }
         ]
+      },
+      "visual": {
+        "animation": "fireball",
+        "sound": "fireball",
+        "accent": "#FFB02E",
+        "duration": 0.42,
+        "intensity": 4,
+        "count": 1
       },
       "art": "Art/cards/talisman_fire.png"
     },
@@ -661,6 +693,55 @@
       "art": "Art/cards/poison_palm.png"
     },
     {
+      "id": "poison_needles",
+      "name": "淬毒飞针",
+      "type": "talisman",
+      "class": "danxiu",
+      "rarity": "uncommon",
+      "cost": 1,
+      "description": "造成2点伤害，施加5层中毒；消耗",
+      "flavor": "从黑伞追魂客遗骸上取下的三枚蓝芒毒针。",
+      "exhaust": true,
+      "effects": [
+        {
+          "action": "damage",
+          "value": 2,
+          "target": "enemy"
+        },
+        {
+          "action": "apply_status",
+          "status": "poison",
+          "stacks": 5,
+          "target": "enemy"
+        }
+      ],
+      "upgrade": {
+        "description": "造成3点伤害，施加7层中毒；消耗",
+        "effects": [
+          {
+            "action": "damage",
+            "value": 3,
+            "target": "enemy"
+          },
+          {
+            "action": "apply_status",
+            "status": "poison",
+            "stacks": 7,
+            "target": "enemy"
+          }
+        ]
+      },
+      "visual": {
+        "animation": "impact",
+        "sound": "sword_slash",
+        "accent": "#49C7A2",
+        "duration": 0.32,
+        "intensity": 3,
+        "count": 3
+      },
+      "art": "Art/cards/poison_palm.png"
+    },
+    {
       "id": "venom_burst",
       "name": "万毒蚀心",
       "type": "spell",
@@ -718,6 +799,14 @@
           }
         ]
       },
+      "visual": {
+        "animation": "slash",
+        "sound": "sword_slash",
+        "accent": "#BFEAFF",
+        "duration": 0.42,
+        "intensity": 5,
+        "count": 2
+      },
       "art": "Art/cards/flying_sword.png"
     },
     {
@@ -745,6 +834,14 @@
             "target": "all_enemies"
           }
         ]
+      },
+      "visual": {
+        "animation": "slash",
+        "sound": "sword_slash",
+        "accent": "#B8F2FF",
+        "duration": 0.52,
+        "intensity": 7,
+        "count": 3
       },
       "art": "Art/cards/sword_qi.png"
     },
@@ -1574,6 +1671,14 @@
             "target": "self"
           }
         ]
+      },
+      "visual": {
+        "animation": "heal",
+        "sound": "heal",
+        "accent": "#76E59A",
+        "duration": 0.62,
+        "intensity": 0,
+        "count": 1
       },
       "art": "Art/cards/rejuvenation.png"
     },

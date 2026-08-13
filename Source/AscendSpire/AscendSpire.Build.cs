@@ -13,6 +13,7 @@ public class AscendSpire : ModuleRules
 			"Core",
 			"CoreUObject",
 			"Engine",
+			"HTTP",
 			"Json",
 			"JsonUtilities",
 			"UMG",

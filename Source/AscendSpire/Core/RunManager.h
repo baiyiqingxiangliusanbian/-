@@ -7,6 +7,121 @@
 #include "NarrativeSystem.h"
 #include "RunManager.generated.h"
 
+struct FInfiniteNarrativeReward;
+struct FInfiniteEnemySpec;
+struct FInfiniteVariableUpdate;
+
+USTRUCT(BlueprintType)
+struct FRPBodyCondition
+{
+	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly) FString Name;
+	UPROPERTY(BlueprintReadOnly) int32 Severity = 1;
+	/** 0 表示无固定截止回合，由后续剧情治愈或恶化。 */
+	UPROPERTY(BlueprintReadOnly) int32 RemainingRPTurns = 0;
+};
+
+USTRUCT(BlueprintType)
+struct FRPNarrativeSkillState
+{
+	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly) FString Name;
+	UPROPERTY(BlueprintReadOnly) int32 Level = 1;
+	UPROPERTY(BlueprintReadOnly) bool bKnown = true;
+};
+
+USTRUCT(BlueprintType)
+struct FRPRelationshipState
+{
+	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly) FString CharacterId;
+	UPROPERTY(BlueprintReadOnly) FString DisplayName;
+	UPROPERTY(BlueprintReadOnly) int32 Affinity = 0;
+	UPROPERTY(BlueprintReadOnly) FString Bond = TEXT("ally");
+};
+
+USTRUCT(BlueprintType)
+struct FRPFactionAlertState
+{
+	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly) FString FactionId;
+	UPROPERTY(BlueprintReadOnly) int32 AlertLevel = 0;
+	UPROPERTY(BlueprintReadOnly) int32 RemainingRPTurns = 0;
+	UPROPERTY(BlueprintReadOnly) TArray<FString> Traits;
+};
+
+/** 一轮仍保留原文的 RP 记录；旧记录会在达到预算后压缩为 FRPMemoryEvent。 */
+USTRUCT(BlueprintType)
+struct FRPNarrativeTurn
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly)
+	int32 TurnId = 0;
+
+	UPROPERTY(BlueprintReadOnly)
+	int32 Cycle = 0;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString Title;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString Speaker;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString Narration;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString Dialogue;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString ChoiceText;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString ResultSummary;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString Next;
+
+	/** 主模型同一份结构化回复中给出的记忆候选，未提供时由本地确定性生成。 */
+	UPROPERTY(BlueprintReadOnly)
+	FString MemoryJson;
+};
+
+/** 可检索的长期剧情记忆。它替代无限增长的一整段散文摘要。 */
+USTRUCT(BlueprintType)
+struct FRPMemoryEvent
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly)
+	FString EventId;
+
+	UPROPERTY(BlueprintReadOnly)
+	int32 SourceTurn = 0;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString Title;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString Summary;
+
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FString> Participants;
+
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FString> Facts;
+
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FString> Unresolved;
+
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FString> Keywords;
+
+	UPROPERTY(BlueprintReadOnly)
+	float Importance = 0.5f;
+};
+
 /** Run 持久状态 */
 USTRUCT(BlueprintType)
 struct FRunState
@@ -66,6 +181,99 @@ struct FRunState
 	/** 本局历史最高到达层数（1-based，用于成就结算） */
 	UPROPERTY(BlueprintReadOnly)
 	int32 HighestFloorThisRun = 0;
+
+	/** 无尽叙事模式：地图节点由 LLM/RP 场景替代，直到战败才结束。 */
+	UPROPERTY(BlueprintReadOnly)
+	bool bInfiniteNarrativeMode = false;
+
+	/** 已完成的叙事战斗轮数。 */
+	UPROPERTY(BlueprintReadOnly)
+	int32 InfiniteCycle = 0;
+
+	/** 压缩后的最近 RP 历史，随存档持久化并回注到提示词。 */
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FString> RPHistory;
+
+	/** 尚未压缩、可逐字回注的最近完整 RP 轮次。 */
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FRPNarrativeTurn> RPRecentTurns;
+
+	/** 从旧轮次提取的结构化长期记忆。 */
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FRPMemoryEvent> RPMemoryEvents;
+
+	/** MVU 提交前的状态快照，用于校验失败、读档或以后实现回滚。 */
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FString> RPStateSnapshots;
+
+	UPROPERTY(BlueprintReadOnly)
+	int32 RPTurnSerial = 0;
+
+	/** 上一次实际选中偶发弱事件的 RP 轮次，用于防止连续滞用。 */
+	UPROPERTY(BlueprintReadOnly)
+	int32 LastRPIncidentalTurn = -100000;
+
+	/** 最近一场战斗的确定性摘要；不把整份逐伤害日志塞进提示词。 */
+	UPROPERTY(BlueprintReadOnly)
+	FString LastCombatDigest;
+
+	/**
+	 * 最近一场已获胜遭遇的引擎权威结论。它独立于 LLM 的 MVU 状态，
+	 * 防止旧的“受伤/回防/战斗未定”等描述让同一敌人反复复活。
+	 */
+	UPROPERTY(BlueprintReadOnly)
+	FString LastResolvedEncounterFact;
+
+	/** MVU 风格世界状态 JSON。 */
+	UPROPERTY(BlueprintReadOnly)
+	FString RPWorldStateJson = TEXT("{}");
+
+	/** 引擎可直接消费的类型化 RP 状态。 */
+	UPROPERTY(BlueprintReadOnly) FString RPCurrentLocation;
+	UPROPERTY(BlueprintReadOnly) FString RPCurrentAct = TEXT("act_1");
+	UPROPERTY(BlueprintReadOnly) TArray<FString> RPEnvironmentTraits;
+	/** -3..+3，正数利于玩家、负数利于敌人；进入下一场无限剧情战斗后消耗。 */
+	UPROPERTY(BlueprintReadOnly) int32 RPCombatEdge = 0;
+	UPROPERTY(BlueprintReadOnly) FString RPCombatEdgeSource;
+	UPROPERTY(BlueprintReadOnly) TArray<FRPBodyCondition> RPBodyConditions;
+	/** 只参与剧情所有权与后续选择，不强迫每件信件、地图、丹药都变成实体卡。 */
+	UPROPERTY(BlueprintReadOnly) TArray<FString> RPNarrativeItems;
+	UPROPERTY(BlueprintReadOnly) TArray<FRPNarrativeSkillState> RPSkills;
+	UPROPERTY(BlueprintReadOnly) TArray<FRPRelationshipState> RPRelationships;
+	UPROPERTY(BlueprintReadOnly) TArray<FRPFactionAlertState> RPFactionAlerts;
+
+	/** 已经提交过的剧情事实键；防止同一取得/损失/奖励在连续轮次重复结算。 */
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FString> RPSettledFactKeys;
+
+	/** 本局由 LLM 创作并通过本地规则校验的卡牌与法宝；随存档持久化。 */
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FCardData> DynamicCards;
+
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FRelicData> DynamicRelics;
+
+	/** 选择剧情后、战斗结算前的遭遇快照，避免在获得物界面退出后跳过战斗。 */
+	UPROPERTY(BlueprintReadOnly)
+	bool bInfiniteCombatPending = false;
+
+	UPROPERTY(BlueprintReadOnly)
+	EMapNodeType PendingInfiniteNodeType = EMapNodeType::Combat;
+
+	UPROPERTY(BlueprintReadOnly)
+	FEnemyData PendingInfiniteEnemy;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString PendingInfiniteResultSummary;
+
+	UPROPERTY(BlueprintReadOnly)
+	int32 PendingInfiniteEnemyHPBonus = 0;
+
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FDeckCard> PendingInfiniteRewardCards;
+
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FString> PendingInfiniteRewardRelics;
 };
 
 /** 节点遭遇描述 */
@@ -275,7 +483,49 @@ public:
 
 	/** 开始新的一局 */
 	UFUNCTION(BlueprintCallable)
-	bool StartNewRun(int32 Seed);
+	bool StartNewRun(int32 Seed, bool bInfiniteNarrative = false);
+
+	/** 应用经白名单验证的剧情奖励。 */
+	void ApplyInfiniteNarrativeReward(const FInfiniteNarrativeReward& Reward);
+
+	/** 首次提交返回 true；同一稳定键再次出现返回 false。空键视为无需去重。 */
+	bool TryCommitNarrativeSettlement(const FString& SettlementKey);
+
+	/** 合并 LLM 返回的 MVU 状态补丁；旧接口保留给开场等受信任本地内容。 */
+	void ApplyRPWorldStatePatch(const FString& PatchJson);
+	bool ApplyRPWorldStatePatchTransactional(const FString& PatchJson, FString& OutError);
+	bool RestorePreviousRPWorldState(FString& OutError);
+	/** 一次 RP 选择时先衰减旧的临时状态，再原子应用新更新。 */
+	void AdvanceRPVariableDurations();
+	void ApplyInfiniteVariableUpdates(const TArray<FInfiniteVariableUpdate>& Updates, TArray<FString>& OutReceipts);
+	FString BuildRPVariableContext() const;
+	int32 GetFactionAlertLevel(const FString& FactionId) const;
+	int32 GetInfiniteEnemyHPBonus(const FString& FactionId) const;
+
+	/** 兼容旧存档的简短历史记录。 */
+	void AddRPHistory(const FString& Entry);
+	void AddRPNarrativeTurn(const FString& Title, const FString& Speaker, const FString& Narration,
+		const FString& Dialogue, const FString& ChoiceText, const FString& ResultSummary,
+		const FString& Next, const FString& MemoryJson, int32 CompressThreshold, int32 KeepRawRounds,
+		int32 UnsummarizedTokenThreshold);
+	FString BuildRPRecentContext(int32 MaxRounds, int32 TokenBudget) const;
+	FString BuildRPMemoryContext(const FString& Query, int32 TokenBudget) const;
+	void RecordInfiniteCombatDigest(const TArray<FString>& EnemyIds, int32 TurnCount,
+		int32 HPBefore, int32 HPAfter, const TArray<FString>& CombatLog);
+
+	/** 从现有模板生成受限的 LLM 运行时敌人。 */
+	FString RegisterInfiniteEnemy(const FInfiniteEnemySpec& Spec, int32 ChoiceIndex);
+
+	/** 登记即将进入的无尽叙事战斗，供奖励和斩妖图鉴结算。 */
+	void PrepareInfiniteCombat(EMapNodeType NodeType, const TArray<FString>& EnemyIds);
+
+	/** 保存/恢复剧情选择后的获得物界面和运行时敌人。 */
+	void SavePendingInfiniteCombat(EMapNodeType NodeType, const FEnemyData& Enemy, int32 EnemyHPBonus,
+		const FString& ResultSummary,
+		const TArray<FDeckCard>& RewardCards, const TArray<FString>& RewardRelics);
+	bool RestorePendingInfiniteCombat(FNodeEncounter& OutEncounter, FString& OutResultSummary,
+		TArray<FDeckCard>& OutRewardCards, TArray<FString>& OutRewardRelics);
+	void ClearPendingInfiniteCombat();
 
 	/** 战斗胜利结算（返回奖励）。bChoseKillLoot: 是否选择杀人夺宝 */
 	UFUNCTION(BlueprintCallable)
@@ -303,6 +553,18 @@ public:
 	/** 获取坊市商品 */
 	UFUNCTION(BlueprintCallable)
 	TArray<FShopItem> GetShopStock();
+	/** RP 游戏功能网关：生成指定品级、指定价格倍率的纯卡牌商店。 */
+	void GenerateNarrativeShopStock(const FString& Rarity, float PriceMultiplier, int32 Count = 6);
+	/** RP 选择界面使用的确定性卡组操作。 */
+	bool RemoveDeckCardAt(int32 DeckIndex, bool bAllowCurse = false);
+	/** RP 常驻整理：花费固定灵石删除单个卡组实例，允许删至空卡组。成功时已立即存档。 */
+	bool RemoveDeckCardForGold(int32 DeckIndex, int32 GoldCost, FString& OutCardName);
+	bool UpgradeDeckCardAt(int32 DeckIndex);
+	/** Prevent commandlet fixtures from reading or modifying the player's permanent authored library. */
+	void SetPersistentAuthoredContentEnabledForAutomationTest(bool bEnabled)
+	{
+		bPersistentAuthoredContentEnabled = bEnabled;
+	}
 
 	/** 购买商品 */
 	UFUNCTION(BlueprintCallable)
@@ -325,6 +587,14 @@ public:
 
 	/** 查法宝数据 */
 	const FRelicData* GetRelicData(const FString& RelicId) const { return RelicTable.Find(RelicId); }
+	const TArray<FCardData>& GetDynamicCards() const { return State.DynamicCards; }
+	const TArray<FRelicData>& GetDynamicRelics() const { return State.DynamicRelics; }
+	/** Cross-save LLM content library, available from the title-screen collection. */
+	void RefreshPersistentAuthoredContent() { LoadPersistentAuthoredContent(); }
+	const TArray<FCardData>& GetPersistentAuthoredCards() const { return PersistentAuthoredCards; }
+	const TArray<FRelicData>& GetPersistentAuthoredRelics() const { return PersistentAuthoredRelics; }
+	bool DeletePersistentAuthoredCard(const FString& CardId);
+	bool DeletePersistentAuthoredRelic(const FString& RelicId);
 
 	/** 查敌人数据 */
 	const FEnemyData* GetEnemyData(const FString& EnemyId) const { return EnemyTable.Find(EnemyId); }
@@ -367,6 +637,10 @@ private:
 
 	TArray<FString> NormalEnemyIds;
 	TArray<FString> EliteEnemyIds;
+	/** Cross-save authored content library. Successful LLM creations are retained here. */
+	TArray<FCardData> PersistentAuthoredCards;
+	TArray<FRelicData> PersistentAuthoredRelics;
+	bool bPersistentAuthoredContentEnabled = true;
 
 	mutable FRandomStream Rng;
 	int32 RunSeed = 0;
@@ -376,6 +650,9 @@ private:
 
 	void Log(const FString& Msg) const;
 	bool LoadAllData(FString& OutError);
+	void LoadPersistentAuthoredContent();
+	void SavePersistentAuthoredContent() const;
+	static FString GetAuthoredContentSavePath();
 
 	TArray<FString> RollEnemyGroup(EMapNodeType Type);
 	FString RollRandomCard(const FString& RarityFilter = TEXT("")) const;
@@ -392,6 +669,12 @@ private:
 	// ---------- 迷雾探索内部 ----------
 	/** 由层数推导敌人强化等级: 0-2→0, 3-5→1, 6-8→2, 9-11→3 */
 	static int32 EnemyLevelForFloor(int32 Floor);
+	/**
+	 * 从现有敌人模板生成一个确定性的运行时变体。
+	 * 变体只存在于本局内，仍然使用 FEnemyData 的同一套字段，便于后续由编辑器/LLM 直接描述。
+	 */
+	FString MakeProceduralEnemyVariant(const FEnemyData& Template, int32 Floor, int32 ChoiceIndex,
+		int32 SlotIndex, bool bElite, FRandomStream& Stream);
 	/** 最近一场战斗的节点类型与敌人（胜利结算/斩妖图鉴用） */
 	EMapNodeType LastCombatNodeType = EMapNodeType::Combat;
 	TArray<FString> LastCombatEnemyIds;
