@@ -218,7 +218,6 @@ struct FInfiniteNarrativeBeat
 	FString StatePatchJson;
 	FString MemoryJson;
 	TArray<FInfiniteNarrativeChoice> Choices;
-	bool bFallback = false;
 	bool bError = false;
 	FString Diagnostic;
 };
@@ -312,9 +311,6 @@ public:
 		const FInfiniteNarrativeRequestContext& Context, const FInfiniteCardForgeJob& Job,
 		FOnInfiniteCardForgeReady Completion);
 
-	static FInfiniteNarrativeBeat BuildFallbackBeat(const FInfiniteNarrativeRequestContext& Context,
-		const FString& Diagnostic = TEXT(""));
-
 	/** Headless regression hook: exercises the exact production response parser without issuing HTTP. */
 	bool ParseResponseForAutomationTest(const FString& ResponseBody, FInfiniteNarrativeBeat& OutBeat,
 		FString& OutError) const;
@@ -407,7 +403,6 @@ private:
 	bool ParseResponse(const FString& ResponseBody, FInfiniteNarrativeBeat& OutBeat, FString& OutError) const;
 	bool ValidateStatePatch(const FString& PatchJson, FString& OutError) const;
 	void CompleteSuccess(FInfiniteNarrativeBeat Beat);
-	void CompleteBestEffort(const FString& Diagnostic);
 	FString BuildSystemPrompt(const FInfiniteNarrativeRequestContext& Context) const;
 	FString BuildUserPrompt(const FInfiniteNarrativeRequestContext& Context) const;
 	TArray<FNarrativePromptMessage> BuildNarrativeMessages(FString& OutDiagnostic) const;

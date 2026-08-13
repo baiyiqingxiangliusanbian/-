@@ -1571,10 +1571,10 @@ void UInfiniteNarrativeService::PrepareChoiceRoutePlan()
 	// available. Quality affects only locally computed luck modifiers; it is never shown
 	// to or chosen by the narrative model.
 	const TArray<FRoutePoolEntry> Pool = {
-		{TEXT("combat"),       20,  0, true},
-		{TEXT("card_forge"),    16,  2, true},
-		{TEXT("relic_reward"),  10,  3, PendingContext.AvailableFixedRelicIds.Num() > 0},
-		{TEXT("reward"),         9,  2, true},
+		{TEXT("combat"),       21,  0, true},
+		{TEXT("card_forge"),    17,  2, true},
+		{TEXT("relic_reward"),  11,  3, PendingContext.AvailableFixedRelicIds.Num() > 0},
+		{TEXT("reward"),        10,  2, true},
 		{TEXT("shop"),           7,  1, true},
 		{TEXT("rest"),           5,  1, true},
 		{TEXT("upgrade"),        7,  2, PendingContext.UpgradeableCardCount > 0},
@@ -1582,8 +1582,7 @@ void UInfiniteNarrativeService::PrepareChoiceRoutePlan()
 		{TEXT("hurt"),           5, -1, PendingContext.HP > 6},
 		{TEXT("lose_gold"),      3, -1, PendingContext.Gold > 0},
 		{TEXT("heal"),           4,  1, PendingContext.HP < PendingContext.MaxHP},
-		{TEXT("gain_gold"),      5,  1, true},
-		{TEXT("continue_rp"),    4,  0, true}
+		{TEXT("gain_gold"),      5,  1, true}
 	};
 	const float Luck = FMath::Clamp(PendingContext.RouteRewardBias, 0.f, 1.f);
 	for (int32 ChoiceSlot = 0; ChoiceSlot < 3; ++ChoiceSlot)
@@ -2032,9 +2031,7 @@ void UInfiniteNarrativeService::HandleHttpComplete(FHttpRequestPtr Request, FHtt
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] request failed succeeded=%s response_valid=%s"),
 			bSucceeded ? TEXT("true") : TEXT("false"), Response.IsValid() ? TEXT("true") : TEXT("false"));
-		FInfiniteNarrativeBeat Fallback = BuildFallbackBeat(PendingContext, TEXT("LLM连接失败，本轮使用本地应急分支"));
-		for (int32 Index = 0; Index < Fallback.Choices.Num(); ++Index) ApplyChoiceRoutePlan(Fallback.Choices[Index], Index);
-		CompleteSuccess(MoveTemp(Fallback));
+		CompleteWithError(TEXT("剧情导演连接失败或超时；本幕未推进，请重试本幕"));
 		return;
 	}
 	const FString ResponseBody = bWriterStreaming ? BuildWriterStreamTransportResponse()
@@ -2045,21 +2042,17 @@ void UInfiniteNarrativeService::HandleHttpComplete(FHttpRequestPtr Request, FHtt
 		FMath::Max(0.0, FPlatformTime::Seconds() - WriterRequestStartedAt));
 	if (Response->GetResponseCode() < 200 || Response->GetResponseCode() >= 300)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] single narrative call returned HTTP %d; using local fallback"),
+		UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] single narrative call returned HTTP %d; beat remains unchanged"),
 			Response->GetResponseCode());
-		FInfiniteNarrativeBeat Fallback = BuildFallbackBeat(PendingContext,
-			FString::Printf(TEXT("LLM HTTP %d，本轮使用本地应急分支"), Response->GetResponseCode()));
-		for (int32 Index = 0; Index < Fallback.Choices.Num(); ++Index) ApplyChoiceRoutePlan(Fallback.Choices[Index], Index);
-		CompleteSuccess(MoveTemp(Fallback));
+		CompleteWithError(FString::Printf(TEXT("剧情导演返回 HTTP %d；本幕未推进，请重试本幕"),
+			Response->GetResponseCode()));
 		return;
 	}
 
 	PendingDraftJson = ExtractTransportContent(ResponseBody).TrimStartAndEnd();
 	if (PendingDraftJson.IsEmpty())
 	{
-		FInfiniteNarrativeBeat Fallback = BuildFallbackBeat(PendingContext, TEXT("剧情响应为空，本轮使用本地应急分支"));
-		for (int32 Index = 0; Index < Fallback.Choices.Num(); ++Index) ApplyChoiceRoutePlan(Fallback.Choices[Index], Index);
-		CompleteSuccess(MoveTemp(Fallback));
+		CompleteWithError(TEXT("剧情导演返回空响应；本幕未推进，请重试本幕"));
 		return;
 	}
 	FString DraftError;
@@ -2068,10 +2061,7 @@ void UInfiniteNarrativeService::HandleHttpComplete(FHttpRequestPtr Request, FHtt
 	if (!bHasPendingDraftBeat)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] writer response is not renderable: %s"), *DraftError);
-		FInfiniteNarrativeBeat Fallback = BuildFallbackBeat(PendingContext,
-			TEXT("剧情响应格式异常，本轮使用本地应急分支；日志已记录：") + DraftError.Left(240));
-		for (int32 Index = 0; Index < Fallback.Choices.Num(); ++Index) ApplyChoiceRoutePlan(Fallback.Choices[Index], Index);
-		CompleteSuccess(MoveTemp(Fallback));
+		CompleteWithError(TEXT("剧情响应格式异常；本幕未推进，请重试本幕。日志：") + DraftError.Left(240));
 		return;
 	}
 	PendingDraftBeat.Diagnostic = TEXT("剧情、页面路由与状态差分由单轮导演直接生成；MVU已停用");
@@ -2323,7 +2313,7 @@ void UInfiniteNarrativeService::IssueStateCompilation(const FString& DraftJson)
 	ActiveRequest->OnProcessRequestComplete().BindUObject(this,
 		&UInfiniteNarrativeService::HandleStateCompilationComplete);
 	if (!ActiveRequest->ProcessRequest())
-		CompleteBestEffort(TEXT("MVU 状态编译请求未能启动"));
+		CompleteWithError(TEXT("MVU 状态编译请求未能启动；本幕未推进"));
 }
 
 void UInfiniteNarrativeService::HandleStateCompilationComplete(FHttpRequestPtr Request,
@@ -2337,7 +2327,7 @@ void UInfiniteNarrativeService::HandleStateCompilationComplete(FHttpRequestPtr R
 	ActiveRequest.Reset();
 	if (!bSucceeded || !Response.IsValid())
 	{
-		CompleteBestEffort(TEXT("MVU 状态编译连接失败或超时"));
+		CompleteWithError(TEXT("MVU 状态编译连接失败或超时；本幕未推进"));
 		return;
 	}
 	UE_LOG(LogTemp, Log, TEXT("[InfiniteRP] MVU compiler response status=%d body_chars=%d"),
@@ -2359,7 +2349,7 @@ void UInfiniteNarrativeService::HandleStateCompilationComplete(FHttpRequestPtr R
 			IssueStateCompilation(PendingDraftJson);
 			return;
 		}
-		CompleteBestEffort(FString::Printf(TEXT("MVU 状态编译 HTTP %d"), Response->GetResponseCode()));
+		CompleteWithError(FString::Printf(TEXT("MVU 状态编译 HTTP %d；本幕未推进"), Response->GetResponseCode()));
 		return;
 	}
 
@@ -2380,7 +2370,7 @@ void UInfiniteNarrativeService::HandleStateCompilationComplete(FHttpRequestPtr R
 			IssueStateCompilation(PendingDraftJson);
 			return;
 		}
-		CompleteBestEffort(FString::Printf(TEXT("MVU 状态编译格式错误：%s"), *Error));
+		CompleteWithError(FString::Printf(TEXT("MVU 状态编译格式错误；本幕未推进：%s"), *Error));
 		return;
 	}
 	Beat.Diagnostic = TEXT("剧情生成与 MVU 状态编译均完成");
@@ -2818,44 +2808,6 @@ void UInfiniteNarrativeService::CompleteSuccess(FInfiniteNarrativeBeat Beat)
 		FOnInfiniteNarrativeReady Completion = MoveTemp(PendingCompletion);
 		Completion.Execute(true, Beat);
 	}
-}
-
-void UInfiniteNarrativeService::CompleteBestEffort(const FString& Diagnostic)
-{
-	if (bHasPendingDraftBeat)
-	{
-		FInfiniteNarrativeBeat Beat = PendingDraftBeat;
-		Beat.bFallback = true;
-		Beat.Diagnostic = TEXT("MVU异常已记录，本轮使用保守剧情结算并继续游戏");
-		for (int32 Index = 0; Index < Beat.Choices.Num(); ++Index)
-		{
-			FInfiniteNarrativeChoice& Choice = Beat.Choices[Index];
-			const bool bHasReward = Choice.Reward.HPChange != 0 || Choice.Reward.GoldChange != 0
-				|| Choice.Reward.Cards.Num() > 0 || Choice.Reward.RelicIds.Num() > 0
-				|| Choice.Reward.RemovedCardIds.Num() > 0 || Choice.Reward.RemovedRelicIds.Num() > 0
-				|| Choice.Reward.CreatedCards.Num() > 0 || Choice.Reward.CreatedRelics.Num() > 0;
-			if (Choice.Next == TEXT("combat") || Choice.Operations.Num() > 0 || bHasReward
-				|| Choice.VariableUpdates.Num() > 0)
-				continue;
-
-			FString Fact = Choice.ResolvedImpactObject.TrimStartAndEnd();
-			if (Fact.IsEmpty()) Fact = Choice.ResultSummary.TrimStartAndEnd();
-			if (Fact.IsEmpty()) Fact = Choice.ConsequenceIntent.TrimStartAndEnd();
-			if (Fact.IsEmpty()) Fact = FString::Printf(TEXT("继续推进第%d项选择引发的剧情"), Index + 1);
-
-			// A failed compiler must not invent a catch-all engine variable. The locked prose
-			// remains playable as a narrative-only fallback, while every mechanical array
-			// stays empty and the next turn receives no fictional task-system state.
-			Choice.GmJudgement = TEXT("MVU未能编译出合法工具；本轮仅保留锁定叙事，不捏造任务、环境、好感、警戒、资源或内容奖励。" );
-			if (Choice.SettlementKey.IsEmpty())
-				Choice.SettlementKey = TEXT("fallback_fact:") + Fact.Left(140);
-		}
-		UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] MVU failed; preserving writer beat with conservative local settlement. diagnostic=%s"),
-			*Diagnostic);
-		CompleteSuccess(MoveTemp(Beat));
-		return;
-	}
-	CompleteWithError(Diagnostic);
 }
 
 bool UInfiniteNarrativeService::ValidateStatePatch(const FString& PatchJson, FString& OutError) const
@@ -3581,11 +3533,14 @@ bool UInfiniteNarrativeService::ParseResponse(const FString& ResponseBody, FInfi
 		}
 		if (Choice.Text.IsEmpty())
 		{
-			Choice.Text = FString::Printf(TEXT("继续观察眼前局势（选项%d）"), ChoiceSlot + 1);
+			OutError = FString::Printf(TEXT("choice %d 缺少 text，拒绝用本地占位选项破坏剧情"), ChoiceSlot + 1);
+			return false;
 		}
 		if (Choice.ResultSummary.IsEmpty())
 		{
-			Choice.ResultSummary = TEXT("你暂时按兵不动，等待局势继续变化。");
+			OutError = FString::Printf(TEXT("choice %d 缺少 result_summary，拒绝用本地占位结果替代模型结果"),
+				ChoiceSlot + 1);
+			return false;
 		}
 		if (Choice.Next == TEXT("combat") && Choice.Enemy.TemplateId.IsEmpty())
 		{
@@ -4234,8 +4189,7 @@ bool UInfiniteNarrativeService::ReserveModelRequest(const TCHAR* PhaseLabel)
 	{
 		const FString Diagnostic = FString::Printf(TEXT("本轮模型请求已达到安全上限%d次（最后阶段：%s）"),
 			MaxTotalModelRequests, PhaseLabel ? PhaseLabel : TEXT("unknown"));
-		if (bHasPendingDraftBeat) CompleteBestEffort(Diagnostic);
-		else CompleteWithError(Diagnostic);
+		CompleteWithError(Diagnostic + TEXT("；本幕未推进"));
 		return false;
 	}
 	++TotalModelRequestCount;
@@ -4255,69 +4209,4 @@ void UInfiniteNarrativeService::CompleteWithError(const FString& Diagnostic)
 	Beat.Diagnostic = Diagnostic;
 	FOnInfiniteNarrativeReady Completion = MoveTemp(PendingCompletion);
 	Completion.Execute(false, Beat);
-}
-
-FInfiniteNarrativeBeat UInfiniteNarrativeService::BuildFallbackBeat(const FInfiniteNarrativeRequestContext& Context,
-	const FString& Diagnostic)
-{
-	FInfiniteNarrativeBeat Beat;
-	Beat.bFallback = true;
-	Beat.Diagnostic = Diagnostic;
-	Beat.Title = TEXT("雨夜 · 旧驿");
-	Beat.Speaker = TEXT("沈照璃");
-	Beat.PortraitId = TEXT("shen_zhaoli");
-	Beat.Expression = TEXT("concerned");
-	Beat.Narration = FString::Printf(TEXT(
-		"第%d次死里逃生后，你与沈照璃在废弃山驿中避雨。檐角铜铃被山风吹得轻响，"
-		"她替你重新包好裂开的护腕，却没有立刻收回手。远处三股妖气正沿不同山道逼近。"),
-		FMath::Max(1, Context.Cycle));
-	Beat.Dialogue = TEXT("“伤还没好全，别再一个人逞强。你选路，我陪你走。”");
-	FInfiniteDialogueLine DialogueLine;
-	DialogueLine.Speaker = Beat.Speaker;
-	DialogueLine.PortraitId = Beat.PortraitId;
-	DialogueLine.Expression = Beat.Expression;
-	DialogueLine.Text = Beat.Dialogue;
-	Beat.DialogueLines.Add(DialogueLine);
-	Beat.StatePatchJson = TEXT("{\"companion\":{\"name\":\"沈照璃\",\"affinity_delta\":1},\"location\":\"旧驿\"}");
-
-	struct FFallbackOption
-	{
-		const TCHAR* Text;
-		const TCHAR* Summary;
-		const TCHAR* Next;
-		const TCHAR* Card;
-		const TCHAR* Enemy;
-		const TCHAR* EnemyName;
-		const TCHAR* Ability;
-	};
-	static const FFallbackOption Options[] = {
-		{TEXT("接过她递来的药布，坦言自己也害怕失去同伴"), TEXT("你第一次没有用玩笑掩饰恐惧。沈照璃沉默片刻，把一式护身剑诀写入你的玉简。"), TEXT("continue_rp"), TEXT("defend"), TEXT(""), TEXT(""), TEXT("")},
-		{TEXT("推开驿门，沿着最浓烈的妖气主动迎上去"), TEXT("你以行动打破沉默。她将灵力渡入剑锋，雨幕中的狼妖随即扑至，战斗一触即发。"), TEXT("combat"), TEXT(""), TEXT("wolf_demon"), TEXT("逐月狼妖"), TEXT("first_strike")},
-		{TEXT("查看驿站留下的血字，尝试找出妖气的真正来源"), TEXT("你辨出血字并非遗言，而是一道被人故意留给后来者的警示。沈照璃示意你继续说下去。"), TEXT("continue_rp"), TEXT(""), TEXT(""), TEXT(""), TEXT("")}
-	};
-	for (const FFallbackOption& Option : Options)
-	{
-		FInfiniteNarrativeChoice Choice;
-		Choice.Text = Option.Text;
-		Choice.ResultSummary = Option.Summary;
-		Choice.Next = Option.Next;
-		if (FCString::Strlen(Option.Card) > 0)
-		{
-			FInfiniteRewardCard Card;
-			Card.CardId = Option.Card;
-			Choice.Reward.Cards.Add(Card);
-		}
-		if (Choice.Next == TEXT("combat"))
-		{
-			Choice.Enemy.TemplateId = Option.Enemy;
-			Choice.Enemy.Name = Option.EnemyName;
-			Choice.Enemy.Story = TEXT("山驿雨幕中凝成的敌影，与方才主动迎战的选择存在直接因果。");
-			Choice.Enemy.HPScale = 1.f + FMath::Min(1.0f, Context.Cycle * 0.035f);
-			Choice.Enemy.IntentScale = 1.f + FMath::Min(0.6f, Context.Cycle * 0.02f);
-			Choice.Enemy.Abilities.Add(Option.Ability);
-			Choice.Enemy.AbilityDesc = TEXT("受剧情与轮次影响的异变敌人");
-		}
-		Beat.Choices.Add(Choice);
-	}
-	return Beat;
 }

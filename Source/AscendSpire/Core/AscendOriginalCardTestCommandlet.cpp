@@ -528,6 +528,7 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 	int32 BaseGoodRoutes = 0;
 	int32 LuckyGoodRoutes = 0;
 	bool bSawFixedRelicRouteWithPayload = false;
+	bool bSawPureContinueRoute = false;
 	const TSet<FString> GoodRoutes = {
 		TEXT("card_forge"), TEXT("relic_reward"), TEXT("reward"), TEXT("shop"),
 		TEXT("rest"), TEXT("upgrade"), TEXT("heal"), TEXT("gain_gold")
@@ -540,6 +541,7 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 		for (int32 Slot = 0; Slot < BaseRoutes.Num(); ++Slot)
 		{
 			++SlotRouteCounts[Slot].FindOrAdd(BaseRoutes[Slot]);
+			if (BaseRoutes[Slot] == TEXT("continue_rp")) bSawPureContinueRoute = true;
 			if (GoodRoutes.Contains(BaseRoutes[Slot])) ++BaseGoodRoutes;
 			if (BaseRoutes[Slot] == TEXT("relic_reward") && Payloads.IsValidIndex(Slot)
 				&& RoutePlanContext.AvailableFixedRelicIds.Contains(Payloads[Slot]))
@@ -557,8 +559,21 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 			SlotRouteCounts[0].FindRef(TEXT("card_forge")),
 			SlotRouteCounts[1].FindRef(TEXT("card_forge")),
 			SlotRouteCounts[2].FindRef(TEXT("card_forge")));
-	Check(bSawFixedRelicRouteWithPayload && ForgeSpread < 90 && LuckyGoodRoutes > BaseGoodRoutes,
-		TEXT("A/B/C share one weighted pool, fixed relic payloads are reachable, and relic luck shifts outcomes upward"));
+	Check(!bSawPureContinueRoute && bSawFixedRelicRouteWithPayload
+		&& ForgeSpread < 90 && LuckyGoodRoutes > BaseGoodRoutes,
+		TEXT("A/B/C share one actionable weighted pool, fixed relic payloads are reachable, and relic luck shifts outcomes upward"));
+
+	const FString MissingResultContent = TEXT(
+		"{\"schema_version\":\"2.0-direct-route\",\"scene\":{\"title\":\"断桥\","
+		"\"narration\":\"断桥另一端传来铁索声。\",\"dialogue\":\"\",\"messages\":[]},\"choices\":["
+		"{\"text\":\"踏上断桥\",\"next\":\"combat\",\"encounter\":{\"template_id\":\"mountain_imp\"}},"
+		"{\"text\":\"检查桥墩\",\"result_summary\":\"你找到桥下暗门。\",\"next\":\"shop\"},"
+		"{\"text\":\"斩断铁索\",\"result_summary\":\"铁索坠入深谷。\",\"next\":\"reward\"}]}");
+	FInfiniteNarrativeBeat MissingResultBeat;
+	FString MissingResultError;
+	Check(!Service->ParseResponseForAutomationTest(MakeTransportResponse(MissingResultContent),
+		MissingResultBeat, MissingResultError) && MissingResultError.Contains(TEXT("result_summary")),
+		TEXT("writer responses missing a choice result are rejected instead of receiving a local placeholder settlement"));
 
 	FNarrativeGenerationPreset BuiltInMvuPreset;
 	FString BuiltInMvuError;

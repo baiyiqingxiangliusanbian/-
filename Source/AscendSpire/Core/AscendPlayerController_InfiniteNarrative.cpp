@@ -1052,6 +1052,11 @@ void AAscendPlayerController::StartInfiniteNarrativeRun()
 	}
 	bInfiniteChoiceResolved = false;
 	BuildInfiniteOpening();
+	if (CurrentInfiniteBeat.bError)
+	{
+		ShowInfiniteNarrativeError(CurrentInfiniteBeat.Diagnostic);
+		return;
+	}
 	ShowInfiniteNarrative();
 }
 
@@ -1106,8 +1111,9 @@ void AAscendPlayerController::BuildInfiniteOpening()
 	}
 	if (CurrentInfiniteBeat.Choices.Num() != 3)
 	{
-		FInfiniteNarrativeRequestContext Context;
-		CurrentInfiniteBeat = UInfiniteNarrativeService::BuildFallbackBeat(Context, TEXT("初始法器不足"));
+		CurrentInfiniteBeat = FInfiniteNarrativeBeat();
+		CurrentInfiniteBeat.bError = true;
+		CurrentInfiniteBeat.Diagnostic = TEXT("初始法器数据不足，无法生成三个开场选择；没有生成替代剧情");
 	}
 }
 
@@ -1574,12 +1580,6 @@ void AAscendPlayerController::ShowInfiniteNarrative()
 	RPAddToVBox(Box, RPMakeWrappedText(Box, CurrentInfiniteBeat.Title, 34,
 		FAscendUIStyle::GoldYellow()), FMargin(20.f, 12.f, 20.f, 4.f));
 
-	if (CurrentInfiniteBeat.bFallback && !CurrentInfiniteBeat.Diagnostic.IsEmpty())
-	{
-		RPAddToVBox(Box, RPMakeWrappedText(Box,
-			FString::Printf(TEXT("本轮使用保守结算 · %s"), *CurrentInfiniteBeat.Diagnostic), 12,
-			FAscendUIStyle::DimGray()), FMargin(120.f, 2.f));
-	}
 	RPAddPad(Box, 16.f);
 	RPAddToVBox(Box, RPMakeWrappedText(Box, CurrentInfiniteBeat.Narration, 19, FAscendUIStyle::PaperWhite()),
 		FMargin(120.f, 12.f));
