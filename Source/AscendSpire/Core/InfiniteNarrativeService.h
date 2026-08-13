@@ -150,10 +150,12 @@ struct FInfiniteCardForgeJob
 	FString Acquisition = TEXT("gain");
 };
 
-/** Safe subset of enemy fields that the LLM may control. */
+/** Encounter specification; identity/count/scaling are engine-owned, while prose may supply origin/faction. */
 struct FInfiniteEnemySpec
 {
 	FString TemplateId;
+	/** Engine-owned encounter size. The narrative model may explain it but cannot change it. */
+	int32 Count = 1;
 	/** 剧情势力稳定 ID，用于匹配临时警戒度。 */
 	FString FactionId;
 	FString Name;
@@ -323,7 +325,8 @@ public:
 		FCardData& OutCard, FString& OutError) const;
 	/** Deterministic local route planner hook; no model request and no game-state mutation. */
 	TArray<FString> PlanRoutesForAutomationTest(const FInfiniteNarrativeRequestContext& Context,
-		int32 Seed, TArray<FString>* OutPayloads = nullptr);
+		int32 Seed, TArray<FString>* OutPayloads = nullptr,
+		TArray<FInfiniteEnemySpec>* OutCombatPlans = nullptr);
 	/** Headless hook for verifying regex/recursive authoring-worldbook routing. */
 	FString ResolveAuthoringKnowledgeForAutomationTest(const FString& DraftJson);
 	/** Compatibility hook retained for existing automation callers; narrative repetition is advisory only. */
@@ -352,6 +355,8 @@ private:
 	TArray<int32> PendingChoiceRouteValue;
 	/** Optional engine-owned payload, currently the exact built-in relic id for relic_reward. */
 	TArray<FString> PendingChoiceRoutePayload;
+	/** Engine-owned combat identity, count and scaling rolled together with each combat route. */
+	TArray<FInfiniteEnemySpec> PendingChoiceCombatPlan;
 	bool bSuppressRoutePlanLog = false;
 	ERequestPhase RequestPhase = ERequestPhase::Generation;
 	int32 TokenCapAttempt = 0;

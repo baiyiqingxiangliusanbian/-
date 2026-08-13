@@ -263,6 +263,10 @@ struct FRunState
 	UPROPERTY(BlueprintReadOnly)
 	FEnemyData PendingInfiniteEnemy;
 
+	/** Complete pending encounter. Empty in legacy single-enemy saves. */
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FEnemyData> PendingInfiniteEnemies;
+
 	UPROPERTY(BlueprintReadOnly)
 	FString PendingInfiniteResultSummary;
 
@@ -520,7 +524,7 @@ public:
 	void PrepareInfiniteCombat(EMapNodeType NodeType, const TArray<FString>& EnemyIds);
 
 	/** 保存/恢复剧情选择后的获得物界面和运行时敌人。 */
-	void SavePendingInfiniteCombat(EMapNodeType NodeType, const FEnemyData& Enemy, int32 EnemyHPBonus,
+	void SavePendingInfiniteCombat(EMapNodeType NodeType, const TArray<FEnemyData>& Enemies, int32 EnemyHPBonus,
 		const FString& ResultSummary,
 		const TArray<FDeckCard>& RewardCards, const TArray<FString>& RewardRelics);
 	bool RestorePendingInfiniteCombat(FNodeEncounter& OutEncounter, FString& OutResultSummary,

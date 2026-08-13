@@ -1523,12 +1523,14 @@ void URunManager::PrepareInfiniteCombat(EMapNodeType NodeType, const TArray<FStr
 	LastCombatEnemyIds = EnemyIds;
 }
 
-void URunManager::SavePendingInfiniteCombat(EMapNodeType NodeType, const FEnemyData& Enemy, int32 EnemyHPBonus,
+void URunManager::SavePendingInfiniteCombat(EMapNodeType NodeType, const TArray<FEnemyData>& Enemies, int32 EnemyHPBonus,
 	const FString& ResultSummary, const TArray<FDeckCard>& RewardCards, const TArray<FString>& RewardRelics)
 {
 	State.bInfiniteCombatPending = true;
 	State.PendingInfiniteNodeType = NodeType;
-	State.PendingInfiniteEnemy = Enemy;
+	State.PendingInfiniteEnemies = Enemies;
+	// Retain the first enemy for backward readers while new saves preserve the full group.
+	State.PendingInfiniteEnemy = Enemies.Num() > 0 ? Enemies[0] : FEnemyData();
 	State.PendingInfiniteEnemyHPBonus = EnemyHPBonus;
 	State.PendingInfiniteResultSummary = ResultSummary.Left(600);
 	State.PendingInfiniteRewardCards = RewardCards;
@@ -1538,15 +1540,25 @@ void URunManager::SavePendingInfiniteCombat(EMapNodeType NodeType, const FEnemyD
 bool URunManager::RestorePendingInfiniteCombat(FNodeEncounter& OutEncounter, FString& OutResultSummary,
 	TArray<FDeckCard>& OutRewardCards, TArray<FString>& OutRewardRelics)
 {
-	if (!State.bInfiniteNarrativeMode || !State.bInfiniteCombatPending || State.PendingInfiniteEnemy.Id.IsEmpty())
+	if (!State.bInfiniteNarrativeMode || !State.bInfiniteCombatPending)
 		return false;
 
-	EnemyTable.Add(State.PendingInfiniteEnemy.Id, State.PendingInfiniteEnemy);
+	TArray<FEnemyData> PendingEnemies = State.PendingInfiniteEnemies;
+	if (PendingEnemies.Num() == 0 && !State.PendingInfiniteEnemy.Id.IsEmpty())
+		PendingEnemies.Add(State.PendingInfiniteEnemy);
+	if (PendingEnemies.Num() == 0) return false;
+	for (const FEnemyData& Enemy : PendingEnemies)
+	{
+		if (Enemy.Id.IsEmpty()) continue;
+		EnemyTable.Add(Enemy.Id, Enemy);
+	}
 	OutEncounter = FNodeEncounter();
 	OutEncounter.Type = State.PendingInfiniteNodeType;
-	OutEncounter.EnemyIds.Add(State.PendingInfiniteEnemy.Id);
+	for (const FEnemyData& Enemy : PendingEnemies)
+		if (!Enemy.Id.IsEmpty()) OutEncounter.EnemyIds.Add(Enemy.Id);
+	if (OutEncounter.EnemyIds.Num() == 0) return false;
 	OutEncounter.EnemyHPBonus = State.PendingInfiniteEnemyHPBonus;
-	OutEncounter.StoryText = State.PendingInfiniteEnemy.Story;
+	OutEncounter.StoryText = PendingEnemies[0].Story;
 	OutResultSummary = State.PendingInfiniteResultSummary;
 	OutRewardCards = State.PendingInfiniteRewardCards;
 	OutRewardRelics = State.PendingInfiniteRewardRelics;
@@ -1559,6 +1571,7 @@ void URunManager::ClearPendingInfiniteCombat()
 {
 	State.bInfiniteCombatPending = false;
 	State.PendingInfiniteEnemy = FEnemyData();
+	State.PendingInfiniteEnemies.Reset();
 	State.PendingInfiniteEnemyHPBonus = 0;
 	State.PendingInfiniteResultSummary.Reset();
 	State.PendingInfiniteRewardCards.Reset();

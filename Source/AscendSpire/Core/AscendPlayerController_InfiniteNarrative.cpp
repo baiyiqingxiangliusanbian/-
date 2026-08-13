@@ -2111,17 +2111,22 @@ void AAscendPlayerController::SelectInfiniteNarrativeChoice(int32 ChoiceIndex)
 	EMapNodeType NodeType = EMapNodeType::Combat;
 	if (PendingInfiniteChoice.Enemy.Tier == TEXT("elite")) NodeType = EMapNodeType::Elite;
 	else if (PendingInfiniteChoice.Enemy.Tier == TEXT("boss")) NodeType = EMapNodeType::Boss;
-	Run->PrepareInfiniteCombat(NodeType, {EnemyId});
+	const int32 EnemyCount = FMath::Clamp(PendingInfiniteChoice.Enemy.Count, 1, 3);
+	TArray<FString> EnemyIds;
+	EnemyIds.Init(EnemyId, EnemyCount);
+	Run->PrepareInfiniteCombat(NodeType, EnemyIds);
 
 	PendingInfiniteEncounter = FNodeEncounter();
 	PendingInfiniteEncounter.Type = NodeType;
-	PendingInfiniteEncounter.EnemyIds.Add(EnemyId);
+	PendingInfiniteEncounter.EnemyIds = EnemyIds;
 	PendingInfiniteEncounter.EnemyLevel = 0;
 	PendingInfiniteEncounter.EnemyHPBonus = Run->GetInfiniteEnemyHPBonus(PendingInfiniteChoice.Enemy.FactionId);
 	PendingInfiniteEncounter.StoryText = PendingInfiniteChoice.Enemy.Story;
 	if (const FEnemyData* Enemy = Run->GetEnemyData(EnemyId))
 	{
-		Run->SavePendingInfiniteCombat(NodeType, *Enemy, PendingInfiniteEncounter.EnemyHPBonus,
+		TArray<FEnemyData> PendingEnemies;
+		PendingEnemies.Init(*Enemy, EnemyCount);
+		Run->SavePendingInfiniteCombat(NodeType, PendingEnemies, PendingInfiniteEncounter.EnemyHPBonus,
 			PendingInfiniteChoice.ResultSummary,
 			PendingNarrativeCards, PendingNarrativeRelics);
 	}

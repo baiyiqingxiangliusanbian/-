@@ -49,7 +49,7 @@
       "id": "forge.enemy",
       "triggers": ["\"next\":\"combat\""],
       "trigger_regex": ["(进入战斗|不可避免的冲突|敌人|袭击|追兵|妖兽|杀手|拦路|伏击|围攻|挑战|拔剑封路)"],
-      "content": "[forge.enemy]\n只有分支确实标记next=combat时才建立遭遇。优先从现有敌人模板名称中选取最接近者，并用name/story表现剧情身份。tier只能normal|elite|boss；hp_scale为0.7~2.5，intent_scale为0.75~1.8；abilities最多3项，只能使用first_strike、thorns:N、enrage_half:N、drain:N、regen:N、block_aura:N、poison_aura:N、start_weak:N、start_vulnerable:N、hand_limit:N、nightmare、gold_drop:N、curse_ritual:N。encounter.story必须说明敌人如何出现以及冲突为何不可避免。"
+      "content": "[forge.enemy｜已由本地路由取代]\n战斗遭遇的模板、名称、数量、单体气血倍率、单体行为倍率和能力均由本地引擎在剧情调用前锁定。模型不得重新选择模板、改名、增减数量或新增能力；只需用encounter.faction_id与encounter.story解释指定敌人如何出现以及冲突为何不可避免，并让可见剧情严格匹配本地变量。"
     },
     {
       "id": "game.services",

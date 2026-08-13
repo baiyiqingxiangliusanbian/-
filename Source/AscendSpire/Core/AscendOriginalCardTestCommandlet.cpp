@@ -529,6 +529,8 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 	int32 LuckyGoodRoutes = 0;
 	bool bSawFixedRelicRouteWithPayload = false;
 	bool bSawPureContinueRoute = false;
+	bool bCombatPlansValid = true;
+	TSet<int32> SeenCombatCounts;
 	const TSet<FString> GoodRoutes = {
 		TEXT("card_forge"), TEXT("relic_reward"), TEXT("reward"), TEXT("shop"),
 		TEXT("rest"), TEXT("upgrade"), TEXT("heal"), TEXT("gain_gold")
@@ -536,8 +538,10 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 	for (int32 Seed = 0; Seed < 1200; ++Seed)
 	{
 		TArray<FString> Payloads;
+		TArray<FInfiniteEnemySpec> CombatPlans;
 		RoutePlanContext.RouteRewardBias = 0.f;
-		const TArray<FString> BaseRoutes = Service->PlanRoutesForAutomationTest(RoutePlanContext, Seed, &Payloads);
+		const TArray<FString> BaseRoutes = Service->PlanRoutesForAutomationTest(
+			RoutePlanContext, Seed, &Payloads, &CombatPlans);
 		for (int32 Slot = 0; Slot < BaseRoutes.Num(); ++Slot)
 		{
 			++SlotRouteCounts[Slot].FindOrAdd(BaseRoutes[Slot]);
@@ -546,6 +550,24 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 			if (BaseRoutes[Slot] == TEXT("relic_reward") && Payloads.IsValidIndex(Slot)
 				&& RoutePlanContext.AvailableFixedRelicIds.Contains(Payloads[Slot]))
 				bSawFixedRelicRouteWithPayload = true;
+			if (BaseRoutes[Slot] == TEXT("combat"))
+			{
+				if (!CombatPlans.IsValidIndex(Slot))
+				{
+					bCombatPlansValid = false;
+					continue;
+				}
+				const FInfiniteEnemySpec& Plan = CombatPlans[Slot];
+				SeenCombatCounts.Add(Plan.Count);
+				const bool bScaleMatchesCount = (Plan.Count == 1
+					&& Plan.HPScale >= 0.90f && Plan.HPScale <= 1.25f
+					&& Plan.IntentScale >= 0.90f && Plan.IntentScale <= 1.15f)
+					|| (Plan.Count == 2 && Plan.HPScale >= 0.65f && Plan.HPScale <= 0.90f
+						&& Plan.IntentScale >= 0.70f && Plan.IntentScale <= 0.92f)
+					|| (Plan.Count == 3 && Plan.HPScale >= 0.48f && Plan.HPScale <= 0.68f
+						&& Plan.IntentScale >= 0.55f && Plan.IntentScale <= 0.78f);
+				bCombatPlansValid &= !Plan.TemplateId.IsEmpty() && !Plan.Name.IsEmpty() && bScaleMatchesCount;
+			}
 		}
 		RoutePlanContext.RouteRewardBias = 1.f;
 		const TArray<FString> LuckyRoutes = Service->PlanRoutesForAutomationTest(RoutePlanContext, Seed);
@@ -562,6 +584,43 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 	Check(!bSawPureContinueRoute && bSawFixedRelicRouteWithPayload
 		&& ForgeSpread < 90 && LuckyGoodRoutes > BaseGoodRoutes,
 		TEXT("A/B/C share one actionable weighted pool, fixed relic payloads are reachable, and relic luck shifts outcomes upward"));
+	Check(bCombatPlansValid && SeenCombatCounts.Num() == 3,
+		TEXT("combat routes pre-roll a named local enemy plus count-aware HP and intent scaling"));
+
+	URunManager* PendingGroupRun = NewObject<URunManager>();
+	const bool bPendingGroupStarted = PendingGroupRun->StartNewRun(20260815, true);
+	FInfiniteEnemySpec PendingGroupSpec;
+	PendingGroupSpec.TemplateId = TEXT("mountain_imp");
+	PendingGroupSpec.Name = TEXT("山魈");
+	PendingGroupSpec.Count = 3;
+	PendingGroupSpec.HPScale = 0.60f;
+	PendingGroupSpec.IntentScale = 0.65f;
+	const FString PendingGroupEnemyId = bPendingGroupStarted
+		? PendingGroupRun->RegisterInfiniteEnemy(PendingGroupSpec, 2) : FString();
+	const FEnemyData* PendingGroupTemplate = PendingGroupRun->GetEnemyData(PendingGroupEnemyId);
+	TArray<FEnemyData> PendingGroup;
+	if (PendingGroupTemplate) PendingGroup.Init(*PendingGroupTemplate, 3);
+	PendingGroupRun->SavePendingInfiniteCombat(EMapNodeType::Combat, PendingGroup, 2,
+		TEXT("三只山魈封住山道。"), {}, {});
+	FNodeEncounter RestoredGroup;
+	FString RestoredGroupSummary;
+	TArray<FDeckCard> RestoredGroupCards;
+	TArray<FString> RestoredGroupRelics;
+	const bool bPendingGroupRestored = PendingGroupRun->RestorePendingInfiniteCombat(RestoredGroup,
+		RestoredGroupSummary, RestoredGroupCards, RestoredGroupRelics);
+	Check(bPendingGroupRestored && RestoredGroup.EnemyIds.Num() == 3
+		&& RestoredGroup.EnemyIds[0] == RestoredGroup.EnemyIds[1]
+		&& RestoredGroupSummary.Contains(TEXT("三只山魈")),
+		TEXT("pending infinite combat preserves the complete multi-enemy encounter for title-screen recovery"));
+	UCombatEngine* PendingGroupCombat = NewObject<UCombatEngine>();
+	if (PendingGroupTemplate) PendingGroupCombat->RegisterRuntimeEnemies({*PendingGroupTemplate});
+	const bool bPendingGroupCombatStarted = PendingGroupCombat->StartCombat(PendingGroupRun->State.Deck,
+		RestoredGroup.EnemyIds, PendingGroupRun->State.RelicIds, PendingGroupRun->State.MaxHP,
+		PendingGroupRun->State.HP, RestoredGroup.EnemyHPBonus, 20260815, 0);
+	Check(bPendingGroupCombatStarted && PendingGroupCombat->Enemies.Num() == 3
+		&& PendingGroupCombat->Enemies[0].State.MaxHP == PendingGroupCombat->Enemies[2].State.MaxHP,
+		TEXT("combat engine instantiates every member of a restored locally-scaled enemy group"));
+	PendingGroupRun->ClearPendingInfiniteCombat();
 
 	const FString MissingResultContent = TEXT(
 		"{\"schema_version\":\"2.0-direct-route\",\"scene\":{\"title\":\"断桥\","

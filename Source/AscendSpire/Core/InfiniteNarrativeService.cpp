@@ -1549,6 +1549,7 @@ void UInfiniteNarrativeService::PrepareChoiceRoutePlan()
 	PendingChoiceRoutePlan.Reset();
 	PendingChoiceRouteValue.Reset();
 	PendingChoiceRoutePayload.Reset();
+	PendingChoiceCombatPlan.Reset();
 	const int32 RouteSeed = PendingSettings.Seed >= 0
 		? PendingSettings.Seed ^ (PendingContext.Cycle * 196613)
 		: FMath::Rand();
@@ -1558,7 +1559,19 @@ void UInfiniteNarrativeService::PrepareChoiceRoutePlan()
 		PendingChoiceRoutePlan.Add(Route);
 		PendingChoiceRouteValue.Add(Value);
 		PendingChoiceRoutePayload.Add(Payload);
+		PendingChoiceCombatPlan.Add(FInfiniteEnemySpec());
 	};
+	static TArray<FEnemyData> CombatTemplates;
+	if (CombatTemplates.Num() == 0)
+	{
+		FString LoadError;
+		TArray<FEnemyData> LoadedEnemies;
+		if (UGameDataLibrary::LoadEnemies(LoadedEnemies, LoadError))
+		{
+			for (const FEnemyData& Enemy : LoadedEnemies)
+				if (Enemy.Tier == TEXT("normal") && Enemy.Id != TEXT("wolf_cub")) CombatTemplates.Add(Enemy);
+		}
+	}
 
 	struct FRoutePoolEntry
 	{
@@ -1610,7 +1623,38 @@ void UInfiniteNarrativeService::PrepareChoiceRoutePlan()
 			if (Roll <= 0) break;
 		}
 		const FString Route = Pool[FMath::Clamp(SelectedIndex, 0, Pool.Num() - 1)].Route;
-		if (Route == TEXT("hurt"))
+		if (Route == TEXT("combat"))
+		{
+			FInfiniteEnemySpec Plan;
+			const int32 CountRoll = Random.RandRange(1, 100);
+			Plan.Count = CountRoll <= 60 ? 1 : (CountRoll <= 92 ? 2 : 3);
+			float MinHP = 0.90f, MaxHP = 1.25f, MinIntent = 0.90f, MaxIntent = 1.15f;
+			if (Plan.Count == 2)
+			{
+				MinHP = 0.65f; MaxHP = 0.90f; MinIntent = 0.70f; MaxIntent = 0.92f;
+			}
+			else if (Plan.Count == 3)
+			{
+				MinHP = 0.48f; MaxHP = 0.68f; MinIntent = 0.55f; MaxIntent = 0.78f;
+			}
+			Plan.HPScale = FMath::RoundToFloat(Random.FRandRange(MinHP, MaxHP) * 100.f) / 100.f;
+			Plan.IntentScale = FMath::RoundToFloat(Random.FRandRange(MinIntent, MaxIntent) * 100.f) / 100.f;
+			if (CombatTemplates.Num() > 0)
+			{
+				const FEnemyData& Template = CombatTemplates[Random.RandRange(0, CombatTemplates.Num() - 1)];
+				Plan.TemplateId = Template.Id;
+				Plan.Name = Template.Name;
+				Plan.Tier = Template.Tier;
+			}
+			else
+			{
+				Plan.TemplateId = TEXT("mountain_imp");
+				Plan.Name = TEXT("山魈");
+			}
+			AddRoute(Route);
+			PendingChoiceCombatPlan.Last() = Plan;
+		}
+		else if (Route == TEXT("hurt"))
 			AddRoute(Route, -FMath::Min(Random.RandRange(5, 15), PendingContext.HP - 1));
 		else if (Route == TEXT("lose_gold"))
 			AddRoute(Route, -FMath::Min(Random.RandRange(3, 18), PendingContext.Gold));
@@ -1633,6 +1677,13 @@ void UInfiniteNarrativeService::PrepareChoiceRoutePlan()
 			*PendingChoiceRoutePlan[0], PendingChoiceRouteValue[0],
 			*PendingChoiceRoutePlan[1], PendingChoiceRouteValue[1],
 			*PendingChoiceRoutePlan[2], PendingChoiceRouteValue[2]);
+		for (int32 Index = 0; Index < PendingChoiceRoutePlan.Num(); ++Index)
+		{
+			if (PendingChoiceRoutePlan[Index] != TEXT("combat") || !PendingChoiceCombatPlan.IsValidIndex(Index)) continue;
+			const FInfiniteEnemySpec& Plan = PendingChoiceCombatPlan[Index];
+			UE_LOG(LogTemp, Display, TEXT("[InfiniteRP] combat plan %c template=%s name=%s count=%d hp=%.2f intent=%.2f"),
+				TCHAR(TEXT('A') + Index), *Plan.TemplateId, *Plan.Name, Plan.Count, Plan.HPScale, Plan.IntentScale);
+		}
 	}
 }
 
@@ -1648,7 +1699,16 @@ FString UInfiniteNarrativeService::DescribeChoiceRoutePlanForPrompt() const
 			? PendingChoiceRoutePayload[Index] : FString();
 		FString Instruction;
 		if (Route == TEXT("combat"))
-			Instruction = TEXT("next=combat；局面必须在选中后立刻进入战斗，并填写encounter，停在第一击结算前");
+		{
+			const FInfiniteEnemySpec Plan = PendingChoiceCombatPlan.IsValidIndex(Index)
+				? PendingChoiceCombatPlan[Index] : FInfiniteEnemySpec();
+			Instruction = FString::Printf(TEXT(
+				"next=combat；本地已锁定敌人名称【%s】、数量%d、单体气血倍率%.2f、单体行为强度倍率%.2f；"
+				"正文和result_summary必须明确出现恰好%d名【%s】并合理解释其来源，不得改名、换敌人、增减数量或改动强度；"
+				"倍率仅供后台结算，不得把倍率或系统数值写进可见剧情；encounter只填写faction_id和story，停在第一击结算前"),
+				Plan.Name.IsEmpty() ? TEXT("山魈") : *Plan.Name, Plan.Count, Plan.HPScale, Plan.IntentScale,
+				Plan.Count, Plan.Name.IsEmpty() ? TEXT("山魈") : *Plan.Name);
+		}
 		else if (Route == TEXT("card_forge"))
 			Instruction = TEXT("next=card_forge；玩家当场获得一个值得化为原创卡的事物，只填写card_concept，不写卡牌规则");
 		else if (Route == TEXT("relic_reward"))
@@ -1698,8 +1758,21 @@ void UInfiniteNarrativeService::ApplyChoiceRoutePlan(FInfiniteNarrativeChoice& C
 	};
 	if (Route == TEXT("combat"))
 	{
+		if (PendingChoiceCombatPlan.IsValidIndex(ChoiceSlot))
+		{
+			const FInfiniteEnemySpec& Plan = PendingChoiceCombatPlan[ChoiceSlot];
+			Choice.Enemy.TemplateId = Plan.TemplateId;
+			Choice.Enemy.Name = Plan.Name;
+			Choice.Enemy.Count = FMath::Clamp(Plan.Count, 1, 3);
+			Choice.Enemy.Tier = Plan.Tier;
+			Choice.Enemy.HPScale = Plan.HPScale;
+			Choice.Enemy.IntentScale = Plan.IntentScale;
+			// Enemy abilities remain exactly those of the local template in this phase.
+			Choice.Enemy.Abilities.Reset();
+			Choice.Enemy.AbilityDesc.Reset();
+		}
 		if (Choice.Enemy.TemplateId.IsEmpty()) Choice.Enemy.TemplateId = TEXT("mountain_imp");
-		if (Choice.Enemy.Name.IsEmpty()) Choice.Enemy.Name = TEXT("剧情敌人");
+		if (Choice.Enemy.Name.IsEmpty()) Choice.Enemy.Name = TEXT("山魈");
 		if (Choice.Enemy.Story.IsEmpty()) Choice.Enemy.Story = Choice.ResultSummary;
 	}
 	else
@@ -2631,8 +2704,8 @@ FString UInfiniteNarrativeService::BuildNarrativeOutputContract() const
 		"card_forge的result_summary必须明确玩家当场已经获得了某件物品、技艺、异常灵感或其他可玩概念，禁止写未来、准备、将会或等待锻造。"
 		"card_concept只能是2~12个中文字符的卡面名称，不得有冒号、标点、解释或任何机制；不要写费用、效果、JSON卡牌、CardScript或生卡任务说明。"
 		"选中后界面会离开RP，独立工坊只负责生卡并加入卡组，不会生成任何剧情。"
-		"combat必须填写encounter：template_name从敌人模板名称逐字选择，并写faction_id/name/story/tier/hp_scale/intent_scale/abilities；"
-		"结果停在第一击结算前。非combat的encounter留空。"
+		"combat的敌人名称、数量、气血倍率和行为倍率已经由当前用户消息中的本地变量锁定，不得重新选择或输出这些字段；"
+		"encounter只填写faction_id和story，能力沿用本地模板且不得新增。结果停在第一击结算前。非combat的encounter留空。"
 		"variable_updates是可选的长期人物/世界变化，只在结果明确支持时写；可用body/condition、item/ownership、skill/knowledge、"
 		"relationship/affinity、relationship/bond、environment/location、environment/trait、environment/combat_edge、faction/alert、faction/trait。"
 		"A/B/C没有气质、风险、收益或玩法含义上的区别，三项都从完全相同的本地带权池独立抽取；不得根据字母赋予固定风格。实际去向始终以本轮抽签为准。"
@@ -2877,13 +2950,15 @@ void UInfiniteNarrativeService::SetRecentNarrativeContextForAutomationTest(
 }
 
 TArray<FString> UInfiniteNarrativeService::PlanRoutesForAutomationTest(
-	const FInfiniteNarrativeRequestContext& Context, int32 Seed, TArray<FString>* OutPayloads)
+	const FInfiniteNarrativeRequestContext& Context, int32 Seed, TArray<FString>* OutPayloads,
+	TArray<FInfiniteEnemySpec>* OutCombatPlans)
 {
 	const FInfiniteNarrativeRequestContext SavedContext = PendingContext;
 	const FInfiniteNarrativeSettings SavedSettings = PendingSettings;
 	const TArray<FString> SavedRoutes = PendingChoiceRoutePlan;
 	const TArray<int32> SavedValues = PendingChoiceRouteValue;
 	const TArray<FString> SavedPayloads = PendingChoiceRoutePayload;
+	const TArray<FInfiniteEnemySpec> SavedCombatPlans = PendingChoiceCombatPlan;
 	PendingContext = Context;
 	PendingSettings.Seed = Seed;
 	bSuppressRoutePlanLog = true;
@@ -2891,11 +2966,13 @@ TArray<FString> UInfiniteNarrativeService::PlanRoutesForAutomationTest(
 	bSuppressRoutePlanLog = false;
 	const TArray<FString> Result = PendingChoiceRoutePlan;
 	if (OutPayloads) *OutPayloads = PendingChoiceRoutePayload;
+	if (OutCombatPlans) *OutCombatPlans = PendingChoiceCombatPlan;
 	PendingContext = SavedContext;
 	PendingSettings = SavedSettings;
 	PendingChoiceRoutePlan = SavedRoutes;
 	PendingChoiceRouteValue = SavedValues;
 	PendingChoiceRoutePayload = SavedPayloads;
+	PendingChoiceCombatPlan = SavedCombatPlans;
 	return Result;
 }
 
@@ -3924,7 +4001,7 @@ FString UInfiniteNarrativeService::BuildSystemPrompt(const FInfiniteNarrativeReq
 		"若说话人出现在角色头像注册表，每条 message.portrait_id 必须使用对应 id；临时路人可留空，由界面按姓名生成颜色占位。expression 使用角色注册表中的差分键；没有特殊情绪时使用 neutral。\n"
 		"推进人物关系或世界冲突；每项选择结果必须落到真实引擎可表达的事实。不要求奖励，负面效果、战斗、交易、关系/势力响应或战术态势同样有效；线索、地点、环境和所谓任务本身不算结果。\n"
 		"最近历史只用于自然衔接，不是本轮效果模板；避免重复上一轮的场景、动作、威胁和机械结果。若目标受时辰或路程阻挡，可在正文中直接跳到有效时刻，不得用多个回合填充等待。\n"
-		"只能使用内容目录中存在的 card/relic/template_id。敌人 abilities 只能使用世界书列出的受支持 token。\n"
+		"只能使用内容目录中存在的卡牌与法宝；战斗敌人的模板、名称、数量、强度与能力均由本地引擎决定，剧情只能解释其来源。\n"
 		"三个选项要有不同情绪、风险与可执行后果。每项必须用 next 明确标记 combat 或 continue_rp；next只是路由，交涉、试探、调查和退让也必须在同一result_summary内完成一次回应与真实后果，不能把裁决推给下一轮。\n"
 		"combat 选项通常提供 encounter，并尽量说明敌人为何出现；描述不足也可以继续显示。不要提前宣告胜负、血战结束、缴获或机缘；胜利奖励由游戏战斗结算生成。若玩家在开战前已经捡起、收下或失去物品，可写对应 rewards 并设置 reward_timing=immediate，游戏会尽力结算。\n"
 		"continue_rp 选项不得提供 encounter，但仍必须当场结算可由第二阶段编译的事实；第一阶段只写自然事实，不直接分配卡牌字段或奖励结构。\n"
@@ -4031,7 +4108,7 @@ FString UInfiniteNarrativeService::BuildContentCatalog() const
 		+ TEXT("\n现有法宝/伙伴名称：") + FString::Join(RelicNames, TEXT("、"))
 		+ TEXT("\n现有敌人模板名称：") + FString::Join(EnemyNames, TEXT("、"))
 		+ TEXT("\n敌人模板原型指南：") + FString::Join(EnemyTemplateGuide, TEXT("；"))
-		+ TEXT("\n引用已有内容时只输出名称；内部ID由本地引擎解析。剧情敌人不必与模板同名：根据叙事身份、战斗风格和强度选择语义最接近的模板名，把剧情称号另写在encounter.name。名称不存在时才原创卡牌或法宝；敌人暂不原创模板。");
+		+ TEXT("\n引用已有卡牌与法宝时只输出名称，内部ID由本地引擎解析。敌人目录只用于理解题材；每个战斗选项当前消息给出的敌人名称、数量与强度才是唯一权威，模型不得另选模板、改名或原创敌人能力。");
 }
 
 FString UInfiniteNarrativeService::LoadCapabilityManifest() const
