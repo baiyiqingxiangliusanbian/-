@@ -1156,17 +1156,144 @@ namespace
 
 	FString SafeEffectDescription(const FCardEffect& Effect)
 	{
+		auto StatusName = [](const FString& StatusId) -> FString
+		{
+			static const TMap<FString, FString> Names = {
+				{TEXT("burn"), TEXT("灼烧")}, {TEXT("poison"), TEXT("中毒")},
+				{TEXT("weak"), TEXT("虚弱")}, {TEXT("vulnerable"), TEXT("易伤")},
+				{TEXT("strength"), TEXT("力量")}, {TEXT("dexterity"), TEXT("敏捷")},
+				{TEXT("nightmare"), TEXT("梦魇")}, {TEXT("temp_strength"), TEXT("临时力量")}
+			};
+			if (const FString* Name = Names.Find(StatusId)) return *Name;
+			return TEXT("特殊状态");
+		};
+		auto ScriptValueName = [&StatusName](const FString& Source) -> FString
+		{
+			static const TMap<FString, FString> Names = {
+				{TEXT("counter"), TEXT("当前计数")}, {TEXT("self_block"), TEXT("当前罡气")},
+				{TEXT("missing_hp"), TEXT("已损气血")}, {TEXT("hand_size"), TEXT("手牌数")},
+				{TEXT("draw_pile"), TEXT("抽牌堆牌数")}, {TEXT("discard_pile"), TEXT("弃牌堆牌数")},
+				{TEXT("cards_played_this_turn"), TEXT("本回合已打出牌数")},
+				{TEXT("basic_gongfa_played"), TEXT("本场已打出的基础牌与功法牌数")},
+				{TEXT("event_value"), TEXT("本次触发数值")}, {TEXT("self_hp"), TEXT("当前气血")},
+				{TEXT("self_spirit"), TEXT("当前灵力")}, {TEXT("turn"), TEXT("当前回合数")},
+				{TEXT("enemy_count"), TEXT("敌人数")}, {TEXT("exhaust_pile"), TEXT("消耗牌堆牌数")},
+				{TEXT("last_card_cost"), TEXT("上一张牌的费用")}, {TEXT("target_hp"), TEXT("目标气血")},
+				{TEXT("target_missing_hp"), TEXT("目标已损气血")}, {TEXT("target_block"), TEXT("目标罡气")}
+			};
+			if (const FString* Name = Names.Find(Source)) return *Name;
+			if (Source.StartsWith(TEXT("self_status:"))) return TEXT("自身") + StatusName(Source.Mid(12)) + TEXT("层数");
+			if (Source.StartsWith(TEXT("target_status:"))) return TEXT("目标") + StatusName(Source.Mid(14)) + TEXT("层数");
+			if (Source.StartsWith(TEXT("var:")))
+			{
+				static const TMap<FString, FString> VariableNames = {
+					{TEXT("ink"), TEXT("墨痕")}, {TEXT("void"), TEXT("虚无")},
+					{TEXT("flame"), TEXT("火种")}, {TEXT("mark"), TEXT("印记")},
+					{TEXT("charge"), TEXT("蓄势")}, {TEXT("momentum"), TEXT("势")},
+					{TEXT("echo"), TEXT("回响")}, {TEXT("blood"), TEXT("血契")}
+				};
+				if (const FString* Name = VariableNames.Find(Source.Mid(4))) return *Name + TEXT("计数");
+				return TEXT("专属计数");
+			}
+			return TEXT("相关数值");
+		};
+		auto EventTagName = [](const FString& Tag) -> FString
+		{
+			static const TMap<FString, FString> Names = {
+				{TEXT("spell"), TEXT("法术牌")}, {TEXT("sword"), TEXT("剑诀牌")},
+				{TEXT("body"), TEXT("炼体牌")}, {TEXT("talisman"), TEXT("符箓牌")},
+				{TEXT("skill"), TEXT("技艺牌")}, {TEXT("gongfa"), TEXT("功法牌")},
+				{TEXT("basic"), TEXT("基础牌")}, {TEXT("damage"), TEXT("伤害")}
+			};
+			if (const FString* Name = Names.Find(Tag)) return *Name;
+			return TEXT("指定类型的牌");
+		};
+		auto ConditionAtom = [&StatusName, &ScriptValueName, &EventTagName](FString Atom) -> FString
+		{
+			Atom.TrimStartAndEndInline();
+			auto Suffix = [&Atom](const FString& Prefix) { return Atom.Mid(Prefix.Len()); };
+			if (Atom.StartsWith(TEXT("self_hp_below:"))) return TEXT("自身气血低于") + Suffix(TEXT("self_hp_below:")) + TEXT("%");
+			if (Atom.StartsWith(TEXT("self_hp_above:"))) return TEXT("自身气血高于") + Suffix(TEXT("self_hp_above:")) + TEXT("%");
+			if (Atom.StartsWith(TEXT("counter_at_least:"))) return TEXT("当前计数至少为") + Suffix(TEXT("counter_at_least:"));
+			if (Atom.StartsWith(TEXT("hand_size_at_least:"))) return TEXT("手牌至少有") + Suffix(TEXT("hand_size_at_least:")) + TEXT("张");
+			if (Atom.StartsWith(TEXT("draw_pile_at_most:"))) return TEXT("抽牌堆至多有") + Suffix(TEXT("draw_pile_at_most:")) + TEXT("张牌");
+			if (Atom.StartsWith(TEXT("discard_pile_at_least:"))) return TEXT("弃牌堆至少有") + Suffix(TEXT("discard_pile_at_least:")) + TEXT("张牌");
+			if (Atom.StartsWith(TEXT("self_has_status:"))) return TEXT("自身拥有") + StatusName(Suffix(TEXT("self_has_status:")));
+			if (Atom.StartsWith(TEXT("self_missing_status:"))) return TEXT("自身没有") + StatusName(Suffix(TEXT("self_missing_status:")));
+			if (Atom.StartsWith(TEXT("target_has_status:"))) return TEXT("目标拥有") + StatusName(Suffix(TEXT("target_has_status:")));
+			if (Atom.StartsWith(TEXT("target_missing_status:"))) return TEXT("目标没有") + StatusName(Suffix(TEXT("target_missing_status:")));
+			if (Atom.StartsWith(TEXT("event_tag_is:"))) return TEXT("本次触发来自") + EventTagName(Suffix(TEXT("event_tag_is:")));
+			for (const FString& Prefix : {TEXT("source_at_least:"), TEXT("source_at_most:"), TEXT("source_equals:")})
+			{
+				if (!Atom.StartsWith(Prefix)) continue;
+				const FString Comparison = Atom.Mid(Prefix.Len());
+				int32 Separator = INDEX_NONE;
+				if (!Comparison.FindLastChar(TEXT('='), Separator)) break;
+				const FString Relation = Prefix == TEXT("source_at_least:") ? TEXT("至少为")
+					: Prefix == TEXT("source_at_most:") ? TEXT("至多为") : TEXT("等于");
+				return ScriptValueName(Comparison.Left(Separator)) + Relation + Comparison.Mid(Separator + 1);
+			}
+			return TEXT("特殊条件满足");
+		};
+		auto ConditionName = [&ConditionAtom](const FString& Condition) -> FString
+		{
+			TArray<FString> OrGroups;
+			Condition.ParseIntoArray(OrGroups, TEXT("||"), true);
+			TArray<FString> LocalizedGroups;
+			for (const FString& Group : OrGroups)
+			{
+				TArray<FString> AndTerms;
+				Group.ParseIntoArray(AndTerms, TEXT("&&"), true);
+				TArray<FString> LocalizedTerms;
+				for (const FString& Term : AndTerms) LocalizedTerms.Add(ConditionAtom(Term));
+				LocalizedGroups.Add(FString::Join(LocalizedTerms, TEXT("且")));
+			}
+			return FString::Join(LocalizedGroups, TEXT("，或"));
+		};
+		auto ZoneName = [](const FString& Zone) -> FString
+		{
+			static const TMap<FString, FString> Names = {
+				{TEXT("hand"), TEXT("手牌")}, {TEXT("draw"), TEXT("抽牌堆")},
+				{TEXT("draw_top"), TEXT("抽牌堆顶")}, {TEXT("draw_random"), TEXT("抽牌堆随机位置")},
+				{TEXT("discard"), TEXT("弃牌堆")}, {TEXT("exhaust"), TEXT("消耗牌堆")},
+				{TEXT("last_played"), TEXT("上一张打出的牌")}
+			};
+			if (const FString* Name = Names.Find(Zone)) return *Name;
+			return TEXT("指定牌区");
+		};
+		auto SelectorName = [&StatusName](const FString& Selector) -> FString
+		{
+			static const TMap<FString, FString> Names = {
+				{TEXT("any"), TEXT("任意牌")}, {TEXT("random"), TEXT("随机牌")},
+				{TEXT("highest_cost"), TEXT("费用最高的牌")}, {TEXT("lowest_cost"), TEXT("费用最低的牌")},
+				{TEXT("upgraded"), TEXT("已升级牌")}, {TEXT("non_upgraded"), TEXT("未升级牌")},
+				{TEXT("retained"), TEXT("保留牌")}, {TEXT("exhausting"), TEXT("消耗牌")}
+			};
+			if (const FString* Name = Names.Find(Selector)) return *Name;
+			if (Selector.StartsWith(TEXT("type:")))
+			{
+				static const TMap<FString, FString> Types = {
+					{TEXT("spell"), TEXT("法术牌")}, {TEXT("sword"), TEXT("剑诀牌")},
+					{TEXT("body"), TEXT("炼体牌")}, {TEXT("talisman"), TEXT("符箓牌")},
+					{TEXT("skill"), TEXT("技艺牌")}, {TEXT("gongfa"), TEXT("功法牌")}
+				};
+				if (const FString* Name = Types.Find(Selector.Mid(5))) return *Name;
+			}
+			if (Selector.StartsWith(TEXT("cost_at_most:"))) return TEXT("费用不高于") + Selector.Mid(13) + TEXT("的牌");
+			if (Selector.StartsWith(TEXT("rarity:"))) return TEXT("指定品阶的牌");
+			return TEXT("符合条件的牌");
+		};
 		FString Text;
 		if (Effect.Action == TEXT("damage")) Text = FString::Printf(TEXT("对一名敌人造成%d点伤害"), Effect.Value);
 		else if (Effect.Action == TEXT("damage_random")) Text = FString::Printf(TEXT("对随机敌人造成%d点伤害"), Effect.Value);
 		else if (Effect.Action == TEXT("damage_all")) Text = FString::Printf(TEXT("对所有敌人造成%d点伤害"), Effect.Value);
 		else if (Effect.Action == TEXT("damage_per_block")) Text = FString::Printf(TEXT("造成%d点加当前罡气的伤害"), Effect.Value);
-		else if (Effect.Action == TEXT("damage_per_status")) Text = FString::Printf(TEXT("造成%d点伤害，每层%s额外+%d"), Effect.Value, *Effect.StatusId, Effect.StatusStacks);
-		else if (Effect.Action == TEXT("damage_all_per_status")) Text = FString::Printf(TEXT("对所有敌人造成%d点伤害，每层%s额外+%d"), Effect.Value, *Effect.StatusId, Effect.StatusStacks);
+		else if (Effect.Action == TEXT("damage_per_status")) Text = FString::Printf(TEXT("造成%d点伤害，每层%s额外+%d"), Effect.Value, *StatusName(Effect.StatusId), Effect.StatusStacks);
+		else if (Effect.Action == TEXT("damage_all_per_status")) Text = FString::Printf(TEXT("对所有敌人造成%d点伤害，每层%s额外+%d"), Effect.Value, *StatusName(Effect.StatusId), Effect.StatusStacks);
 		else if (Effect.Action == TEXT("damage_all_per_repeat")) Text = FString::Printf(TEXT("按当前计数器次数，对所有敌人每次造成%d点伤害"), Effect.Value);
 		else if (Effect.Action == TEXT("damage_all_per_basic_gongfa")) Text = FString::Printf(TEXT("本场每打出过一张基础或功法牌，对所有敌人造成%d点伤害"), Effect.Value);
 		else if (Effect.Action == TEXT("block")) Text = FString::Printf(TEXT("获得%d点罡气"), Effect.Value);
-		else if (Effect.Action == TEXT("block_per_status")) Text = FString::Printf(TEXT("获得%d点罡气，每层%s额外+%d"), Effect.Value, *Effect.StatusId, Effect.StatusStacks);
+		else if (Effect.Action == TEXT("block_per_status")) Text = FString::Printf(TEXT("获得%d点罡气，每层%s额外+%d"), Effect.Value, *StatusName(Effect.StatusId), Effect.StatusStacks);
 		else if (Effect.Action == TEXT("draw")) Text = FString::Printf(TEXT("抽%d张牌"), Effect.Value);
 		else if (Effect.Action == TEXT("discover_draw")) Text = FString::Printf(TEXT("从抽牌堆随机展示%d张牌，选择1张加入手牌"), Effect.Value);
 		else if (Effect.Action == TEXT("gain_spirit")) Text = FString::Printf(TEXT("获得%d点灵力"), Effect.Value);
@@ -1182,43 +1309,38 @@ namespace
 		else if (Effect.Action == TEXT("create_card")) Text = FString::Printf(TEXT("将%d张【%s】置入手牌"), Effect.Value, *Effect.Param);
 		else if (Effect.Action == TEXT("add_card_to_draw")) Text = FString::Printf(TEXT("将%d张【%s】置入抽牌堆"), Effect.Value, *Effect.Param);
 		else if (Effect.Action == TEXT("add_card_to_discard")) Text = FString::Printf(TEXT("将%d张【%s】置入弃牌堆"), Effect.Value, *Effect.Param);
-		else if (Effect.Action == TEXT("move_cards")) Text = FString::Printf(TEXT("从%s选择%d张[%s]移至%s"), *Effect.Source, Effect.Value, *Effect.Param, *Effect.Destination);
-		else if (Effect.Action == TEXT("copy_cards")) Text = FString::Printf(TEXT("从%s复制%d张[%s]至%s"), *Effect.Source, Effect.Value, *Effect.Param, *Effect.Destination);
-		else if (Effect.Action == TEXT("modify_card_cost")) Text = FString::Printf(TEXT("令%s中%d张[%s]本场费用%+d"), *Effect.Source, Effect.Value, *Effect.Param, Effect.StatusStacks);
-		else if (Effect.Action == TEXT("upgrade_cards")) Text = FString::Printf(TEXT("本场强化%s中%d张[%s]"), *Effect.Source, Effect.Value, *Effect.Param);
-		else if (Effect.Action == TEXT("transform_cards")) Text = FString::Printf(TEXT("将%s中%d张[%s]变化为【%s】"), *Effect.Source, Effect.Value, *Effect.Param, *Effect.Destination);
-		else if (Effect.Action == TEXT("shuffle_zone")) Text = FString::Printf(TEXT("重新打乱%s"), *Effect.Source);
+		else if (Effect.Action == TEXT("move_cards")) Text = FString::Printf(TEXT("从%s选择%d张%s移至%s"), *ZoneName(Effect.Source), Effect.Value, *SelectorName(Effect.Param), *ZoneName(Effect.Destination));
+		else if (Effect.Action == TEXT("copy_cards")) Text = FString::Printf(TEXT("从%s复制%d张%s至%s"), *ZoneName(Effect.Source), Effect.Value, *SelectorName(Effect.Param), *ZoneName(Effect.Destination));
+		else if (Effect.Action == TEXT("modify_card_cost")) Text = FString::Printf(TEXT("令%s中%d张%s本场费用%+d"), *ZoneName(Effect.Source), Effect.Value, *SelectorName(Effect.Param), Effect.StatusStacks);
+		else if (Effect.Action == TEXT("upgrade_cards")) Text = FString::Printf(TEXT("本场强化%s中%d张%s"), *ZoneName(Effect.Source), Effect.Value, *SelectorName(Effect.Param));
+		else if (Effect.Action == TEXT("transform_cards")) Text = FString::Printf(TEXT("将%s中%d张%s变化为【%s】"), *ZoneName(Effect.Source), Effect.Value, *SelectorName(Effect.Param), *Effect.Destination);
+		else if (Effect.Action == TEXT("shuffle_zone")) Text = FString::Printf(TEXT("重新打乱%s"), *ZoneName(Effect.Source));
 		else if (Effect.Action == TEXT("cost_free_basic_gongfa")) Text = TEXT("本回合基础牌与功法牌费用变为0");
 		else if (Effect.Action == TEXT("defense_to_strength")) Text = FString::Printf(TEXT("获得%d层力量，本回合获得过罡气则加倍"), Effect.Value);
 		else if (Effect.Action == TEXT("transfer"))
 		{
 			const FString When = Effect.Trigger == TEXT("on_play") || Effect.Trigger.IsEmpty()
 				? TEXT("打出时") : FString::Printf(TEXT("触发%s时"), *Effect.Trigger);
-			Text = FString::Printf(TEXT("%s，将%s按比例转化为%s%s"), *When, *Effect.Source,
-				*Effect.Destination, Effect.bConsumeSource ? TEXT("并消耗来源") : TEXT(""));
+			Text = FString::Printf(TEXT("%s，将%s按比例转化为%s%s"), *When, *ScriptValueName(Effect.Source),
+				*ScriptValueName(Effect.Destination), Effect.bConsumeSource ? TEXT("并消耗来源") : TEXT(""));
 		}
 		else if (Effect.Action == TEXT("power")) Text = FString::Printf(TEXT("运转功法【%s】"), *Effect.StatusId);
 		else if (Effect.Action == TEXT("apply_status") || Effect.Action == TEXT("remove_status")
 			|| Effect.Action == TEXT("set_status") || Effect.Action == TEXT("apply_temp_strength")
 			|| Effect.Action == TEXT("amplify_status"))
 		{
-			static const TMap<FString, FString> StatusNames = {
-				{TEXT("burn"), TEXT("灼烧")}, {TEXT("poison"), TEXT("中毒")}, {TEXT("weak"), TEXT("虚弱")},
-				{TEXT("vulnerable"), TEXT("易伤")}, {TEXT("strength"), TEXT("力量")}, {TEXT("dexterity"), TEXT("敏捷")},
-				{TEXT("nightmare"), TEXT("梦魇")}, {TEXT("temp_strength"), TEXT("临时力量")}
-			};
-			const FString* StatusName = StatusNames.Find(Effect.StatusId);
+			const FString LocalStatusName = StatusName(Effect.StatusId);
 			const FString TargetName = Effect.Target == TEXT("self") ? TEXT("自身")
 				: Effect.Target == TEXT("all_enemies") ? TEXT("所有敌人") : TEXT("目标");
-			if (Effect.Action == TEXT("remove_status")) Text = FString::Printf(TEXT("%s移除%d层%s"), *TargetName, Effect.StatusStacks, StatusName ? **StatusName : *Effect.StatusId);
-			else if (Effect.Action == TEXT("set_status")) Text = FString::Printf(TEXT("将%s的%s设为%d层"), *TargetName, StatusName ? **StatusName : *Effect.StatusId, Effect.StatusStacks);
-			else if (Effect.Action == TEXT("amplify_status")) Text = FString::Printf(TEXT("令%s的%s层数翻倍"), *TargetName, StatusName ? **StatusName : *Effect.StatusId);
-			else Text = FString::Printf(TEXT("%s获得%d层%s"), *TargetName, Effect.StatusStacks, StatusName ? **StatusName : *Effect.StatusId);
+			if (Effect.Action == TEXT("remove_status")) Text = FString::Printf(TEXT("%s移除%d层%s"), *TargetName, Effect.StatusStacks, *LocalStatusName);
+			else if (Effect.Action == TEXT("set_status")) Text = FString::Printf(TEXT("将%s的%s设为%d层"), *TargetName, *LocalStatusName, Effect.StatusStacks);
+			else if (Effect.Action == TEXT("amplify_status")) Text = FString::Printf(TEXT("令%s的%s层数翻倍"), *TargetName, *LocalStatusName);
+			else Text = FString::Printf(TEXT("%s获得%d层%s"), *TargetName, Effect.StatusStacks, *LocalStatusName);
 		}
 		if (!Effect.ScaleBy.IsEmpty())
-			Text += FString::Printf(TEXT("，每%d点%s额外+%d"), FMath::Max(1, Effect.ScaleDivisor), *Effect.ScaleBy, Effect.ScaleFactor);
+			Text += FString::Printf(TEXT("，每%d点%s额外+%d"), FMath::Max(1, Effect.ScaleDivisor), *ScriptValueName(Effect.ScaleBy), Effect.ScaleFactor);
 		if (!Effect.Condition.IsEmpty() && Effect.Condition != TEXT("always"))
-			Text = FString::Printf(TEXT("若[%s]，%s"), *Effect.Condition, *Text);
+			Text = FString::Printf(TEXT("若%s，%s"), *ConditionName(Effect.Condition), *Text);
 		if (Effect.Times > 1) Text += FString::Printf(TEXT("，重复%d次"), Effect.Times);
 		if (Effect.Chance < 0.999f) Text = FString::Printf(TEXT("有%d%%概率%s"), FMath::RoundToInt(Effect.Chance * 100.f), *Text);
 		if (Text.IsEmpty()) Text = TEXT("无主动效果");
@@ -1419,12 +1541,8 @@ void UInfiniteNarrativeService::PrepareChoiceRoutePlan()
 	// surface and is intentionally volatile. The model receives the result of this roll,
 	// not the probabilities, and writes causes that make the selected destination natural.
 	const int32 A = Random.RandRange(0, 99);
-	if (A < 62) AddRoute(TEXT("combat"));
-	else if (A < 77) AddRoute(TEXT("reward"));
-	else if (A < 88) AddRoute(TEXT("gain_gold"), Random.RandRange(8, 25));
-	else if (A < 96 && PendingContext.HP < PendingContext.MaxHP)
-		AddRoute(TEXT("heal"), FMath::Min(Random.RandRange(5, 14), PendingContext.MaxHP - PendingContext.HP));
-	else AddRoute(TEXT("card_forge"));
+	if (A < 80) AddRoute(TEXT("combat"));
+	else AddRoute(TEXT("card_forge"), 1); // 取得原创法器，再由独立工坊将其表现为一张可执行卡。
 
 	const int32 B = Random.RandRange(0, 99);
 	if (B < 65) AddRoute(TEXT("card_forge"));
@@ -1468,7 +1586,9 @@ FString UInfiniteNarrativeService::DescribeChoiceRoutePlanForPrompt() const
 		if (Route == TEXT("combat"))
 			Instruction = TEXT("next=combat；局面必须在选中后立刻进入战斗，并填写encounter，停在第一击结算前");
 		else if (Route == TEXT("card_forge"))
-			Instruction = TEXT("next=card_forge；玩家当场获得一个值得化为原创卡的事物，只填写card_concept，不写卡牌规则");
+			Instruction = Value == 1
+				? TEXT("next=card_forge；玩家当场取得一件原创法器，法器随后以原创卡形式进入卡组；只填写法器的card_concept，不写卡牌规则")
+				: TEXT("next=card_forge；玩家当场获得一个值得化为原创卡的事物，只填写card_concept，不写卡牌规则");
 		else if (Route == TEXT("shop")) Instruction = TEXT("next=shop；编造能立即进入商店的合理理由");
 		else if (Route == TEXT("reward")) Instruction = TEXT("next=reward；编造能立即进入三选一奖励的合理理由");
 		else if (Route == TEXT("rest")) Instruction = TEXT("next=rest；编造能立即进入休息界面的合理理由");

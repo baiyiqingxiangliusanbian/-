@@ -578,7 +578,10 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 		&& ParsedCard.Effects[1].ScaleDivisor == 2, TEXT("dynamic scale source, factor and divisor are registered"));
 	Check(ParsedCard.Effects[1].Condition == TEXT("counter_at_least:1"),
 		TEXT("counter threshold condition is registered"));
-	Check(ParsedCard.Description.Contains(TEXT("self_block")), TEXT("card-face description is rebuilt from executable dynamic values"));
+	Check(ParsedCard.Description.Contains(TEXT("当前计数至少为1"))
+		&& ParsedCard.Description.Contains(TEXT("当前罡气"))
+		&& !ParsedCard.Description.Contains(TEXT("self_block")),
+		TEXT("card-face description localizes executable dynamic values without leaking engine field names"));
 	Check(ParsedCard.UpgradedEffects.Num() == 2 && ParsedCard.UpgradedEffects[0].Value == 3
 		&& ParsedCard.UpgradedEffects[1].Value == 8, TEXT("LLM-authored upgrade effect stack is preserved"));
 	Check(ParsedCard.Visual.Animation == TEXT("slash") && ParsedCard.Visual.Sound == TEXT("sword_slash"),
