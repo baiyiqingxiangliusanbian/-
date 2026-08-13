@@ -2192,6 +2192,21 @@ FString URunManager::RollRandomRelic() const
 	return Pool.Num() > 0 ? Pool[Rng.RandRange(0, Pool.Num() - 1)] : TEXT("");
 }
 
+TArray<FString> URunManager::GetAvailableFixedNarrativeRelicIds() const
+{
+	TArray<FString> Result;
+	for (const auto& Pair : RelicTable)
+	{
+		if (State.RelicIds.Contains(Pair.Key)) continue;
+		// Authored relics have their own permanent-library lifecycle. This route exists to
+		// make the shipped, hand-designed relic set reachable in infinite narrative mode.
+		if (Pair.Key.StartsWith(TEXT("llm_relic_"))) continue;
+		Result.Add(Pair.Key);
+	}
+	Result.Sort();
+	return Result;
+}
+
 TArray<FString> URunManager::RollInitialRelicChoices(int32 Count)
 {
 	// 初始三选一法器 100% 为凡品（不受解锁进度影响）

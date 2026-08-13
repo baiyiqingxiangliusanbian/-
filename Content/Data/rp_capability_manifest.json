@@ -13,6 +13,7 @@
     {"next": "continue_rp", "meaning": "在RP中结算精确气血/灵石变化或纯人物世界结果后继续"},
     {"next": "combat", "meaning": "立即进入战斗；必须提供encounter并停在第一击结算前"},
     {"next": "card_forge", "meaning": "离开RP进入无剧情原创卡锻造；只提供card_concept"},
+    {"next": "relic_reward", "meaning": "按引擎指定名称立即获得一件未拥有的固有法宝，随后继续RP"},
     {"next": "shop", "meaning": "立即进入商店"},
     {"next": "reward", "meaning": "立即进入三选一奖励"},
     {"next": "rest", "meaning": "立即进入休息界面"},

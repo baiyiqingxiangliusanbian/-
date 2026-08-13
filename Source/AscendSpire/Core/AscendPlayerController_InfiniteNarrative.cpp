@@ -1136,6 +1136,17 @@ FInfiniteNarrativeRequestContext AAscendPlayerController::BuildInfiniteNarrative
 		{
 			Context.RelicNames.AddUnique(Relic->Name);
 			Context.RelicNameToId.Add(Relic->Name, Relic->Id);
+			if (Relic->Condition == TEXT("narrative_reward_luck"))
+				Context.RouteRewardBias += FMath::Max(0.f, Relic->Modifier);
+		}
+	}
+	Context.RouteRewardBias = FMath::Clamp(Context.RouteRewardBias, 0.f, 1.f);
+	for (const FString& RelicId : Run->GetAvailableFixedNarrativeRelicIds())
+	{
+		if (const FRelicData* Relic = Run->GetRelicData(RelicId))
+		{
+			Context.AvailableFixedRelicIds.Add(RelicId);
+			Context.FixedRelicIdToName.Add(RelicId, Relic->Name);
 		}
 	}
 	// Runtime-authored library entries remain resolvable by display name even when the

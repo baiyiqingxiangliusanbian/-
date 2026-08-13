@@ -183,7 +183,7 @@ struct FInfiniteNarrativeChoice
 	FString SettlementKey;
 	/** Narrative-only state delta committed only after this branch is selected. */
 	FString StatePatchJson;
-	/** Planned destination: combat/card_forge/shop/reward/rest/upgrade/remove/continue_rp. */
+	/** Planned destination: combat/card_forge/relic_reward/shop/reward/rest/upgrade/remove/continue_rp. */
 	FString Next = TEXT("combat");
 	/** Opening choices and explicitly immediate pre-combat acquisitions are committed before combat. */
 	bool bGrantRewardBeforeCombat = false;
@@ -237,6 +237,11 @@ struct FInfiniteNarrativeRequestContext
 	/** Internal-only resolvers used after the model refers to existing content by name. */
 	TMap<FString, FString> CardNameToId;
 	TMap<FString, FString> RelicNameToId;
+	/** Unowned built-in relics eligible for the local fixed-relic route. */
+	TArray<FString> AvailableFixedRelicIds;
+	TMap<FString, FString> FixedRelicIdToName;
+	/** Positive local modifier supplied by owned relic affixes; never decided by the LLM. */
+	float RouteRewardBias = 0.f;
 	TArray<FString> RecentHistory;
 	/** Full role-aware history; locally unbounded and packed only by provider token budget. */
 	TArray<FNarrativePromptMessage> ChatHistory;
@@ -320,6 +325,9 @@ public:
 		FInfiniteNarrativeBeat& OutBeat, FString& OutError);
 	bool ParseForgedCardForAutomationTest(const FString& ResponseBody, int32 Cycle,
 		FCardData& OutCard, FString& OutError) const;
+	/** Deterministic local route planner hook; no model request and no game-state mutation. */
+	TArray<FString> PlanRoutesForAutomationTest(const FInfiniteNarrativeRequestContext& Context,
+		int32 Seed, TArray<FString>* OutPayloads = nullptr);
 	/** Headless hook for verifying regex/recursive authoring-worldbook routing. */
 	FString ResolveAuthoringKnowledgeForAutomationTest(const FString& DraftJson);
 	/** Compatibility hook retained for existing automation callers; narrative repetition is advisory only. */
@@ -346,6 +354,9 @@ private:
 	/** Engine destinations are rolled before the narrative call; prose explains these outcomes. */
 	TArray<FString> PendingChoiceRoutePlan;
 	TArray<int32> PendingChoiceRouteValue;
+	/** Optional engine-owned payload, currently the exact built-in relic id for relic_reward. */
+	TArray<FString> PendingChoiceRoutePayload;
+	bool bSuppressRoutePlanLog = false;
 	ERequestPhase RequestPhase = ERequestPhase::Generation;
 	int32 TokenCapAttempt = 0;
 	int32 EffectiveMaxOutputTokens = 65535;

@@ -1548,52 +1548,93 @@ void UInfiniteNarrativeService::PrepareChoiceRoutePlan()
 {
 	PendingChoiceRoutePlan.Reset();
 	PendingChoiceRouteValue.Reset();
+	PendingChoiceRoutePayload.Reset();
 	const int32 RouteSeed = PendingSettings.Seed >= 0
 		? PendingSettings.Seed ^ (PendingContext.Cycle * 196613)
 		: FMath::Rand();
 	FRandomStream Random(RouteSeed);
-	auto AddRoute = [this](const FString& Route, int32 Value = 0)
+	auto AddRoute = [this](const FString& Route, int32 Value = 0, const FString& Payload = FString())
 	{
 		PendingChoiceRoutePlan.Add(Route);
 		PendingChoiceRouteValue.Add(Value);
+		PendingChoiceRoutePayload.Add(Payload);
 	};
 
-	// A is assertive: most rolls are a real encounter; every other roll is an immediate
-	// positive payoff. B is the principal original-card lane. C samples the whole engine
-	// surface and is intentionally volatile. The model receives the result of this roll,
-	// not the probabilities, and writes causes that make the selected destination natural.
-	const int32 A = Random.RandRange(0, 99);
-	if (A < 80) AddRoute(TEXT("combat"));
-	else AddRoute(TEXT("card_forge"), 1); // 取得原创法器，再由独立工坊将其表现为一张可执行卡。
+	struct FRoutePoolEntry
+	{
+		const TCHAR* Route;
+		int32 BaseWeight;
+		int32 Quality;
+		bool bAvailable;
+	};
+	// One shared pool for A/B/C. Base weights total 100 when every conditional route is
+	// available. Quality affects only locally computed luck modifiers; it is never shown
+	// to or chosen by the narrative model.
+	const TArray<FRoutePoolEntry> Pool = {
+		{TEXT("combat"),       20,  0, true},
+		{TEXT("card_forge"),    16,  2, true},
+		{TEXT("relic_reward"),  10,  3, PendingContext.AvailableFixedRelicIds.Num() > 0},
+		{TEXT("reward"),         9,  2, true},
+		{TEXT("shop"),           7,  1, true},
+		{TEXT("rest"),           5,  1, true},
+		{TEXT("upgrade"),        7,  2, PendingContext.UpgradeableCardCount > 0},
+		{TEXT("remove"),         5,  0, PendingContext.DeckSize > 1},
+		{TEXT("hurt"),           5, -1, PendingContext.HP > 6},
+		{TEXT("lose_gold"),      3, -1, PendingContext.Gold > 0},
+		{TEXT("heal"),           4,  1, PendingContext.HP < PendingContext.MaxHP},
+		{TEXT("gain_gold"),      5,  1, true},
+		{TEXT("continue_rp"),    4,  0, true}
+	};
+	const float Luck = FMath::Clamp(PendingContext.RouteRewardBias, 0.f, 1.f);
+	for (int32 ChoiceSlot = 0; ChoiceSlot < 3; ++ChoiceSlot)
+	{
+		TArray<int32> Weights;
+		int32 TotalWeight = 0;
+		for (const FRoutePoolEntry& Entry : Pool)
+		{
+			int32 Weight = 0;
+			if (Entry.bAvailable)
+			{
+				const float QualityFactor = Entry.Quality >= 0
+					? 1.f + Luck * Entry.Quality
+					: 1.f / (1.f + Luck * -Entry.Quality);
+				Weight = FMath::Max(1, FMath::RoundToInt(Entry.BaseWeight * QualityFactor * 100.f));
+			}
+			Weights.Add(Weight);
+			TotalWeight += Weight;
+		}
+		int32 Roll = Random.RandRange(1, FMath::Max(1, TotalWeight));
+		int32 SelectedIndex = 0;
+		for (; SelectedIndex < Pool.Num(); ++SelectedIndex)
+		{
+			Roll -= Weights[SelectedIndex];
+			if (Roll <= 0) break;
+		}
+		const FString Route = Pool[FMath::Clamp(SelectedIndex, 0, Pool.Num() - 1)].Route;
+		if (Route == TEXT("hurt"))
+			AddRoute(Route, -FMath::Min(Random.RandRange(5, 15), PendingContext.HP - 1));
+		else if (Route == TEXT("lose_gold"))
+			AddRoute(Route, -FMath::Min(Random.RandRange(3, 18), PendingContext.Gold));
+		else if (Route == TEXT("heal"))
+			AddRoute(Route, FMath::Min(Random.RandRange(4, 12), PendingContext.MaxHP - PendingContext.HP));
+		else if (Route == TEXT("gain_gold")) AddRoute(Route, Random.RandRange(5, 18));
+		else if (Route == TEXT("relic_reward"))
+		{
+			const FString RelicId = PendingContext.AvailableFixedRelicIds[
+				Random.RandRange(0, PendingContext.AvailableFixedRelicIds.Num() - 1)];
+			AddRoute(Route, 0, RelicId);
+		}
+		else AddRoute(Route);
+	}
 
-	const int32 B = Random.RandRange(0, 99);
-	if (B < 65) AddRoute(TEXT("card_forge"));
-	else if (B < 76) AddRoute(TEXT("reward"));
-	else if (B < 84 && PendingContext.UpgradeableCardCount > 0) AddRoute(TEXT("upgrade"));
-	else if (B < 91) AddRoute(TEXT("shop"));
-	else if (B < 96) AddRoute(TEXT("rest"));
-	else AddRoute(TEXT("gain_gold"), Random.RandRange(8, 20));
-
-	const int32 C = Random.RandRange(0, 99);
-	if (C < 14) AddRoute(TEXT("combat"));
-	else if (C < 27) AddRoute(TEXT("card_forge"));
-	else if (C < 39 && PendingContext.HP > 6)
-		AddRoute(TEXT("hurt"), -FMath::Min(Random.RandRange(5, 15), PendingContext.HP - 1));
-	else if (C < 48 && PendingContext.Gold > 0)
-		AddRoute(TEXT("lose_gold"), -FMath::Min(Random.RandRange(3, 18), PendingContext.Gold));
-	else if (C < 57) AddRoute(TEXT("shop"));
-	else if (C < 65) AddRoute(TEXT("reward"));
-	else if (C < 72) AddRoute(TEXT("rest"));
-	else if (C < 79 && PendingContext.UpgradeableCardCount > 0) AddRoute(TEXT("upgrade"));
-	else if (C < 86 && PendingContext.DeckSize > 1) AddRoute(TEXT("remove"));
-	else if (C < 93 && PendingContext.HP < PendingContext.MaxHP)
-		AddRoute(TEXT("heal"), FMath::Min(Random.RandRange(4, 12), PendingContext.MaxHP - PendingContext.HP));
-	else AddRoute(TEXT("gain_gold"), Random.RandRange(5, 18));
-
-	UE_LOG(LogTemp, Display, TEXT("[InfiniteRP] pre-rolled routes A=%s(%d) B=%s(%d) C=%s(%d)"),
-		*PendingChoiceRoutePlan[0], PendingChoiceRouteValue[0],
-		*PendingChoiceRoutePlan[1], PendingChoiceRouteValue[1],
-		*PendingChoiceRoutePlan[2], PendingChoiceRouteValue[2]);
+	if (!bSuppressRoutePlanLog)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[InfiniteRP] shared weighted pool luck=%.2f routes A=%s(%d) B=%s(%d) C=%s(%d)"),
+			Luck,
+			*PendingChoiceRoutePlan[0], PendingChoiceRouteValue[0],
+			*PendingChoiceRoutePlan[1], PendingChoiceRouteValue[1],
+			*PendingChoiceRoutePlan[2], PendingChoiceRouteValue[2]);
+	}
 }
 
 FString UInfiniteNarrativeService::DescribeChoiceRoutePlanForPrompt() const
@@ -1604,13 +1645,19 @@ FString UInfiniteNarrativeService::DescribeChoiceRoutePlanForPrompt() const
 		const FString Route = PendingChoiceRoutePlan.IsValidIndex(Index)
 			? PendingChoiceRoutePlan[Index] : TEXT("continue_rp");
 		const int32 Value = PendingChoiceRouteValue.IsValidIndex(Index) ? PendingChoiceRouteValue[Index] : 0;
+		const FString Payload = PendingChoiceRoutePayload.IsValidIndex(Index)
+			? PendingChoiceRoutePayload[Index] : FString();
 		FString Instruction;
 		if (Route == TEXT("combat"))
 			Instruction = TEXT("next=combat；局面必须在选中后立刻进入战斗，并填写encounter，停在第一击结算前");
 		else if (Route == TEXT("card_forge"))
-			Instruction = Value == 1
-				? TEXT("next=card_forge；玩家当场取得一件原创法器，法器随后以原创卡形式进入卡组；只填写法器的card_concept，不写卡牌规则")
-				: TEXT("next=card_forge；玩家当场获得一个值得化为原创卡的事物，只填写card_concept，不写卡牌规则");
+			Instruction = TEXT("next=card_forge；玩家当场获得一个值得化为原创卡的事物，只填写card_concept，不写卡牌规则");
+		else if (Route == TEXT("relic_reward"))
+		{
+			const FString RelicName = PendingContext.FixedRelicIdToName.FindRef(Payload);
+			Instruction = FString::Printf(TEXT("next=relic_reward；玩家当场获得固有法宝【%s】，必须按其名称与意象编造可信来历，不得改名或改效果"),
+				RelicName.IsEmpty() ? TEXT("未知法宝") : *RelicName);
+		}
 		else if (Route == TEXT("shop")) Instruction = TEXT("next=shop；编造能立即进入商店的合理理由");
 		else if (Route == TEXT("reward")) Instruction = TEXT("next=reward；编造能立即进入三选一奖励的合理理由");
 		else if (Route == TEXT("rest")) Instruction = TEXT("next=rest；编造能立即进入休息界面的合理理由");
@@ -1635,6 +1682,8 @@ void UInfiniteNarrativeService::ApplyChoiceRoutePlan(FInfiniteNarrativeChoice& C
 	if (!PendingChoiceRoutePlan.IsValidIndex(ChoiceSlot)) return;
 	const FString Route = PendingChoiceRoutePlan[ChoiceSlot];
 	const int32 Value = PendingChoiceRouteValue.IsValidIndex(ChoiceSlot) ? PendingChoiceRouteValue[ChoiceSlot] : 0;
+	const FString Payload = PendingChoiceRoutePayload.IsValidIndex(ChoiceSlot)
+		? PendingChoiceRoutePayload[ChoiceSlot] : FString();
 	const TArray<FInfiniteCardForgeJob> ParsedForgeJobs = Choice.CardForgeJobs;
 	Choice.Operations.Reset();
 	Choice.Reward = FInfiniteNarrativeReward();
@@ -1666,6 +1715,11 @@ void UInfiniteNarrativeService::ApplyChoiceRoutePlan(FInfiniteNarrativeChoice& C
 			if (Job.MechanicIntent.IsEmpty())
 				Job.MechanicIntent = TEXT("根据概念的材质、用途、取得方式与情绪设计独特机制");
 			Choice.CardForgeJobs.Add(Job);
+		}
+		else if (Route == TEXT("relic_reward"))
+		{
+			Choice.Next = TEXT("continue_rp");
+			if (!Payload.IsEmpty()) Choice.Reward.RelicIds.AddUnique(Payload);
 		}
 		else if (Route == TEXT("shop")) AddOperation(TEXT("open_shop"));
 		else if (Route == TEXT("reward")) AddOperation(TEXT("open_reward"));
@@ -2579,7 +2633,7 @@ FString UInfiniteNarrativeService::BuildNarrativeOutputContract() const
 		"\"messages\":[{\"speaker\":\"\",\"portrait_id\":\"\",\"expression\":\"neutral\",\"text\":\"\"}]},"
 		"\"state_patch\":{},\"memory\":{\"title\":\"\",\"summary\":\"\",\"participants\":[],\"facts\":[],\"unresolved\":[],\"keywords\":[],\"importance\":1},"
 		"\"choices\":[{\"choice_id\":\"A\",\"text\":\"玩家要做的事\",\"result_summary\":\"选中后立即发生的简短自然语言结果\","
-		"\"next\":\"continue_rp|combat|card_forge|shop|reward|rest|upgrade|remove\",\"card_concept\":\"仅card_forge填写卡面概念名\","
+		"\"next\":\"continue_rp|combat|card_forge|relic_reward|shop|reward|rest|upgrade|remove\",\"card_concept\":\"仅card_forge填写卡面概念名\","
 		"\"variable_updates\":[],\"state_patch\":{},\"encounter\":{}},{\"choice_id\":\"B\",...},{\"choice_id\":\"C\",...}]}。"
 		"choices恰好三项且顺序固定A/B/C。引擎已经在当前用户消息中逐项给出了不可更改的抽签结果；next必须逐字匹配。"
 		"先接受抽签，再倒推一个符合前后文、具体而有戏剧性的原因。若抽到气血-10，就写踩中暗器、遭到反噬或类似明确事故；"
@@ -2591,7 +2645,7 @@ FString UInfiniteNarrativeService::BuildNarrativeOutputContract() const
 		"结果停在第一击结算前。非combat的encounter留空。"
 		"variable_updates是可选的长期人物/世界变化，只在结果明确支持时写；可用body/condition、item/ownership、skill/knowledge、"
 		"relationship/affinity、relationship/bond、environment/location、environment/trait、environment/combat_edge、faction/alert、faction/trait。"
-		"A的气质激进，倾向战斗或正面奖赏；B倾向搜刮、成长和原创卡；C大胆、荒诞、难以预测。实际去向始终以本轮抽签为准。"
+		"A/B/C没有气质、风险、收益或玩法含义上的区别，三项都从完全相同的本地带权池独立抽取；不得根据字母赋予固定风格。实际去向始终以本轮抽签为准。"
 		"正文前1/3结算上一行动，随后迅速出现转折并铺垫三个抽签结果都能成立的因果抓手。上一轮机械效果不是模板。"
 		"本游戏没有任务系统，禁止写当前任务、任务进度、objective或quest。结果可以正面、负面或混合，但必须已经发生，不能写可能、试图、若成功。"),
 		FMath::Clamp(PendingSettings.NarrativeMinChars, 200, 20000),
@@ -2868,6 +2922,29 @@ void UInfiniteNarrativeService::SetRecentNarrativeContextForAutomationTest(
 	const FString& RecentRawContext)
 {
 	PendingContext.RecentRawContext = RecentRawContext;
+}
+
+TArray<FString> UInfiniteNarrativeService::PlanRoutesForAutomationTest(
+	const FInfiniteNarrativeRequestContext& Context, int32 Seed, TArray<FString>* OutPayloads)
+{
+	const FInfiniteNarrativeRequestContext SavedContext = PendingContext;
+	const FInfiniteNarrativeSettings SavedSettings = PendingSettings;
+	const TArray<FString> SavedRoutes = PendingChoiceRoutePlan;
+	const TArray<int32> SavedValues = PendingChoiceRouteValue;
+	const TArray<FString> SavedPayloads = PendingChoiceRoutePayload;
+	PendingContext = Context;
+	PendingSettings.Seed = Seed;
+	bSuppressRoutePlanLog = true;
+	PrepareChoiceRoutePlan();
+	bSuppressRoutePlanLog = false;
+	const TArray<FString> Result = PendingChoiceRoutePlan;
+	if (OutPayloads) *OutPayloads = PendingChoiceRoutePayload;
+	PendingContext = SavedContext;
+	PendingSettings = SavedSettings;
+	PendingChoiceRoutePlan = SavedRoutes;
+	PendingChoiceRouteValue = SavedValues;
+	PendingChoiceRoutePayload = SavedPayloads;
+	return Result;
 }
 
 bool UInfiniteNarrativeService::ParseResponse(const FString& ResponseBody, FInfiniteNarrativeBeat& OutBeat,
@@ -3495,7 +3572,7 @@ bool UInfiniteNarrativeService::ParseResponse(const FString& ResponseBody, FInfi
 		}
 		static const TSet<FString> AllowedDestinations = {
 			TEXT("combat"), TEXT("continue_rp"), TEXT("card_forge"), TEXT("shop"),
-			TEXT("reward"), TEXT("rest"), TEXT("upgrade"), TEXT("remove")
+			TEXT("relic_reward"), TEXT("reward"), TEXT("rest"), TEXT("upgrade"), TEXT("remove")
 		};
 		if (!AllowedDestinations.Contains(Choice.Next))
 		{

@@ -58,8 +58,10 @@
 			"id": "spirit_stone_bag",
 			"name": "灵石袋",
 			"rarity": "common",
-			"description": "鼓鼓囊囊的灵石袋。战斗胜利后额外获得5枚灵石",
+			"description": "鼓鼓囊囊的灵石袋。战斗胜利后额外获得5枚灵石；剧情抉择更容易出现优质收获",
 			"trigger": "on_victory",
+			"condition": "narrative_reward_luck",
+			"modifier": 0.25,
 			"effect": {"action": "gain_gold", "value": 5, "target": "self"},
 			"art": "Art/relics/spirit_stone_bag.png"
 		},

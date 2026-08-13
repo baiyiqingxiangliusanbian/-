@@ -497,7 +497,7 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 		*(FPaths::ProjectContentDir() / TEXT("Data/rp_route_worldbook.json")));
 	FNarrativePromptBuildContext RouteWorldBookContext = BuiltInNarrativeContext;
 	RouteWorldBookContext.WorldBookJson = RouteWorldBookJson;
-	RouteWorldBookContext.GameState = TEXT("A=[[route.combat]]\nB=[[route.upgrade]]\nC=[[route.gold_loss]]");
+	RouteWorldBookContext.GameState = TEXT("A=[[route.combat]]\nB=[[route.relic_reward]]\nC=[[route.upgrade]] [[route.gold_loss]]");
 	const TArray<FNarrativePromptMessage> RouteWorldBookMessages = bBuiltInNarrativeLoaded && bRouteWorldBookLoaded
 		? FNarrativePromptManager::BuildMessages(BuiltInNarrativePreset, RouteWorldBookContext,
 			BuiltInNarrativeDiagnostic) : TArray<FNarrativePromptMessage>();
@@ -507,9 +507,58 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 			{ return Message.Content.Contains(RuleName); });
 	};
 	Check(bRouteWorldBookLoaded && HasRouteRule(TEXT("引擎路由导演协议"))
-		&& HasRouteRule(TEXT("战斗页映射")) && HasRouteRule(TEXT("升级页映射"))
+		&& HasRouteRule(TEXT("战斗页映射")) && HasRouteRule(TEXT("固有法宝映射"))
+		&& HasRouteRule(TEXT("升级页映射"))
 		&& HasRouteRule(TEXT("灵石损失映射")) && !HasRouteRule(TEXT("商店页映射")),
 		TEXT("pre-rolled engine route markers activate only the matching narrative worldbook entries"));
+
+	FInfiniteNarrativeRequestContext RoutePlanContext;
+	RoutePlanContext.Cycle = 3;
+	RoutePlanContext.HP = 42;
+	RoutePlanContext.MaxHP = 70;
+	RoutePlanContext.Gold = 80;
+	RoutePlanContext.DeckSize = 12;
+	RoutePlanContext.UpgradeableCardCount = 8;
+	RoutePlanContext.AvailableFixedRelicIds = {TEXT("soul_jade"), TEXT("spirit_pearl"), TEXT("qi_bell")};
+	RoutePlanContext.FixedRelicIdToName.Add(TEXT("soul_jade"), TEXT("养魂玉"));
+	RoutePlanContext.FixedRelicIdToName.Add(TEXT("spirit_pearl"), TEXT("聚灵珠"));
+	RoutePlanContext.FixedRelicIdToName.Add(TEXT("qi_bell"), TEXT("罡气钟"));
+	TArray<TMap<FString, int32>> SlotRouteCounts;
+	SlotRouteCounts.SetNum(3);
+	int32 BaseGoodRoutes = 0;
+	int32 LuckyGoodRoutes = 0;
+	bool bSawFixedRelicRouteWithPayload = false;
+	const TSet<FString> GoodRoutes = {
+		TEXT("card_forge"), TEXT("relic_reward"), TEXT("reward"), TEXT("shop"),
+		TEXT("rest"), TEXT("upgrade"), TEXT("heal"), TEXT("gain_gold")
+	};
+	for (int32 Seed = 0; Seed < 1200; ++Seed)
+	{
+		TArray<FString> Payloads;
+		RoutePlanContext.RouteRewardBias = 0.f;
+		const TArray<FString> BaseRoutes = Service->PlanRoutesForAutomationTest(RoutePlanContext, Seed, &Payloads);
+		for (int32 Slot = 0; Slot < BaseRoutes.Num(); ++Slot)
+		{
+			++SlotRouteCounts[Slot].FindOrAdd(BaseRoutes[Slot]);
+			if (GoodRoutes.Contains(BaseRoutes[Slot])) ++BaseGoodRoutes;
+			if (BaseRoutes[Slot] == TEXT("relic_reward") && Payloads.IsValidIndex(Slot)
+				&& RoutePlanContext.AvailableFixedRelicIds.Contains(Payloads[Slot]))
+				bSawFixedRelicRouteWithPayload = true;
+		}
+		RoutePlanContext.RouteRewardBias = 1.f;
+		const TArray<FString> LuckyRoutes = Service->PlanRoutesForAutomationTest(RoutePlanContext, Seed);
+		for (const FString& Route : LuckyRoutes) if (GoodRoutes.Contains(Route)) ++LuckyGoodRoutes;
+	}
+	const int32 ForgeSpread = FMath::Max3(
+		SlotRouteCounts[0].FindRef(TEXT("card_forge")),
+		SlotRouteCounts[1].FindRef(TEXT("card_forge")),
+		SlotRouteCounts[2].FindRef(TEXT("card_forge")))
+		- FMath::Min3(
+			SlotRouteCounts[0].FindRef(TEXT("card_forge")),
+			SlotRouteCounts[1].FindRef(TEXT("card_forge")),
+			SlotRouteCounts[2].FindRef(TEXT("card_forge")));
+	Check(bSawFixedRelicRouteWithPayload && ForgeSpread < 90 && LuckyGoodRoutes > BaseGoodRoutes,
+		TEXT("A/B/C share one weighted pool, fixed relic payloads are reachable, and relic luck shifts outcomes upward"));
 
 	FNarrativeGenerationPreset BuiltInMvuPreset;
 	FString BuiltInMvuError;

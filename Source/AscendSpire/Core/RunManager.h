@@ -573,6 +573,8 @@ public:
 	/** 获取随机初始法器（排除已拥有的） */
 	UFUNCTION(BlueprintCallable)
 	TArray<FString> RollInitialRelicChoices(int32 Count = 3);
+	/** Unowned built-in relics available to the infinite-narrative weighted route pool. */
+	TArray<FString> GetAvailableFixedNarrativeRelicIds() const;
 
 	/** 获取所有修道路径（预留） */
 	TArray<FSectPath> GetAllPaths() const { return {}; }
