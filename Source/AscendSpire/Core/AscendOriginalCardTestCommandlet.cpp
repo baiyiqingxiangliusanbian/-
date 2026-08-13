@@ -6,6 +6,7 @@
 #include "InfiniteNarrativeService.h"
 #include "JsonObjectConverter.h"
 #include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "NarrativePromptManager.h"
 #include "RunManager.h"
 #include "Serialization/JsonSerializer.h"
@@ -490,6 +491,25 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 		&& BuiltInNarrativeMessages.Last().Content.Contains(TEXT("抽到card_forge"))
 		&& BuiltInNarrativeMessages.Last().Content.Contains(TEXT("不得加冒号、解释、效果、费用、脚本")),
 		TEXT("single-pass director receives post-history examples for explaining pre-rolled engine routes"));
+
+	FString RouteWorldBookJson;
+	const bool bRouteWorldBookLoaded = FFileHelper::LoadFileToString(RouteWorldBookJson,
+		*(FPaths::ProjectContentDir() / TEXT("Data/rp_route_worldbook.json")));
+	FNarrativePromptBuildContext RouteWorldBookContext = BuiltInNarrativeContext;
+	RouteWorldBookContext.WorldBookJson = RouteWorldBookJson;
+	RouteWorldBookContext.GameState = TEXT("A=[[route.combat]]\nB=[[route.upgrade]]\nC=[[route.gold_loss]]");
+	const TArray<FNarrativePromptMessage> RouteWorldBookMessages = bBuiltInNarrativeLoaded && bRouteWorldBookLoaded
+		? FNarrativePromptManager::BuildMessages(BuiltInNarrativePreset, RouteWorldBookContext,
+			BuiltInNarrativeDiagnostic) : TArray<FNarrativePromptMessage>();
+	const auto HasRouteRule = [&RouteWorldBookMessages](const FString& RuleName)
+	{
+		return RouteWorldBookMessages.ContainsByPredicate([&RuleName](const FNarrativePromptMessage& Message)
+			{ return Message.Content.Contains(RuleName); });
+	};
+	Check(bRouteWorldBookLoaded && HasRouteRule(TEXT("引擎路由导演协议"))
+		&& HasRouteRule(TEXT("战斗页映射")) && HasRouteRule(TEXT("升级页映射"))
+		&& HasRouteRule(TEXT("灵石损失映射")) && !HasRouteRule(TEXT("商店页映射")),
+		TEXT("pre-rolled engine route markers activate only the matching narrative worldbook entries"));
 
 	FNarrativeGenerationPreset BuiltInMvuPreset;
 	FString BuiltInMvuError;

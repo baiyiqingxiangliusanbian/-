@@ -41,6 +41,28 @@ namespace
 		return Result;
 	}
 
+	FString MergeWorldBookEntries(const FString& BaseJson, const FString& EngineRouteJson)
+	{
+		TSharedPtr<FJsonObject> BaseRoot;
+		TSharedPtr<FJsonObject> RouteRoot;
+		const TSharedRef<TJsonReader<>> BaseReader = TJsonReaderFactory<>::Create(BaseJson);
+		const TSharedRef<TJsonReader<>> RouteReader = TJsonReaderFactory<>::Create(EngineRouteJson);
+		const bool bBaseValid = FJsonSerializer::Deserialize(BaseReader, BaseRoot) && BaseRoot.IsValid();
+		const bool bRouteValid = FJsonSerializer::Deserialize(RouteReader, RouteRoot) && RouteRoot.IsValid();
+		if (!bRouteValid) return BaseJson;
+		if (!bBaseValid) return EngineRouteJson;
+
+		TArray<TSharedPtr<FJsonValue>> CombinedEntries;
+		const TArray<TSharedPtr<FJsonValue>>* BaseEntries = nullptr;
+		if (BaseRoot->TryGetArrayField(TEXT("entries"), BaseEntries) && BaseEntries)
+			CombinedEntries.Append(*BaseEntries);
+		const TArray<TSharedPtr<FJsonValue>>* RouteEntries = nullptr;
+		if (RouteRoot->TryGetArrayField(TEXT("entries"), RouteEntries) && RouteEntries)
+			CombinedEntries.Append(*RouteEntries);
+		BaseRoot->SetArrayField(TEXT("entries"), CombinedEntries);
+		return JsonString(BaseRoot);
+	}
+
 	bool ExtractPartialJsonString(const FString& Source, const FString& Key, int32 SearchFrom,
 		FString& OutValue, bool& bOutComplete, int32* OutValueEnd = nullptr)
 	{
@@ -2394,8 +2416,12 @@ TArray<FNarrativePromptMessage> UInfiniteNarrativeService::BuildNarrativeMessage
 	Build.ChatHistory = PendingContext.ChatHistory;
 	if (Build.ChatHistory.Num() == 0 && !PendingContext.RecentRawContext.IsEmpty())
 		Build.ChatHistory.Add({TEXT("system"), TEXT("[兼容旧存档历史]\n") + PendingContext.RecentRawContext});
-	Build.WorldBookJson = PendingSettings.WorldBookOverride.TrimStartAndEnd().IsEmpty()
+	const FString UserOrBuiltInWorldBook = PendingSettings.WorldBookOverride.TrimStartAndEnd().IsEmpty()
 		? LoadWorldBook() : PendingSettings.WorldBookOverride.TrimStartAndEnd();
+	FString EngineRouteWorldBook;
+	FFileHelper::LoadFileToString(EngineRouteWorldBook,
+		*(FPaths::ProjectContentDir() / TEXT("Data/rp_route_worldbook.json")));
+	Build.WorldBookJson = MergeWorldBookEntries(UserOrBuiltInWorldBook, EngineRouteWorldBook);
 	Build.CharacterRegistryJson = PendingSettings.CharacterRegistryOverride.TrimStartAndEnd().IsEmpty()
 		? LoadCharacterRegistry() : PendingSettings.CharacterRegistryOverride.TrimStartAndEnd();
 	Build.TokenBudget = FMath::Clamp(PendingSettings.InputContextTokens, 8192, 2000000);
@@ -2431,6 +2457,21 @@ TArray<FNarrativePromptMessage> UInfiniteNarrativeService::BuildNarrativeMessage
 	GameState += TEXT("\n[引擎权威的类型化剧情变量]\n")
 		+ (PendingContext.EngineVariableContext.IsEmpty() ? TEXT("尚无") : PendingContext.EngineVariableContext);
 	GameState += TEXT("\n[肉鸽节奏]\n本轮页面与数值结果已由引擎提前抽签；不要延续上一轮的机械效果。" );
+	TArray<FString> RouteActivationLines;
+	for (int32 Index = 0; Index < 3; ++Index)
+	{
+		const FString Route = PendingChoiceRoutePlan.IsValidIndex(Index)
+			? PendingChoiceRoutePlan[Index] : TEXT("continue_rp");
+		FString WorldBookKey = Route;
+		if (Route == TEXT("hurt")) WorldBookKey = TEXT("hp_loss");
+		else if (Route == TEXT("heal")) WorldBookKey = TEXT("hp_gain");
+		else if (Route == TEXT("lose_gold")) WorldBookKey = TEXT("gold_loss");
+		else if (Route == TEXT("gain_gold")) WorldBookKey = TEXT("gold_gain");
+		RouteActivationLines.Add(FString::Printf(TEXT("%c=[[route.%s]]"),
+			TCHAR(TEXT('A') + Index), *WorldBookKey));
+	}
+	GameState += TEXT("\n[仅供世界书召回的本轮引擎路由触发词]\n")
+		+ FString::Join(RouteActivationLines, TEXT("\n"));
 	if (PendingSettings.bEnableStructuredMemory && !PendingContext.RecalledMemoryContext.IsEmpty())
 		GameState += TEXT("\n[长期记忆召回]\n") + PendingContext.RecalledMemoryContext;
 	Build.GameState = GameState;
