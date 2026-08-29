@@ -361,6 +361,9 @@ private:
 	ERequestPhase RequestPhase = ERequestPhase::Generation;
 	int32 TokenCapAttempt = 0;
 	int32 EffectiveMaxOutputTokens = 65535;
+	/** Additional writer calls after an otherwise successful HTTP response cannot be parsed. */
+	int32 WriterFormatRetryAttempt = 0;
+	FString LastWriterFormatError;
 	int32 MvuTokenCapAttempt = 0;
 	int32 MvuSemanticRetryAttempt = 0;
 	int32 TotalModelRequestCount = 0;
@@ -423,5 +426,6 @@ private:
 	FString LoadTriggeredAuthoringKnowledge(const FInfiniteNarrativeRequestContext& Context,
 		bool bForceFullManual = false, const FString& DraftOverride = FString()) const;
 	void CompleteWithError(const FString& Diagnostic);
+	bool RetryWriterAfterFormatError(const FString& Error);
 	bool ReserveModelRequest(const TCHAR* PhaseLabel);
 };

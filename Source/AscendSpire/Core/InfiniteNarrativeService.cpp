@@ -1500,6 +1500,8 @@ void UInfiniteNarrativeService::Generate(const FInfiniteNarrativeSettings& Setti
 	PendingDraftJson.Reset();
 	TokenCapAttempt = 0;
 	EffectiveMaxOutputTokens = FMath::Clamp(Settings.MaxOutputTokens, 1024, 262144);
+	WriterFormatRetryAttempt = 0;
+	LastWriterFormatError.Reset();
 	MvuTokenCapAttempt = 0;
 	MvuSemanticRetryAttempt = 0;
 	TotalModelRequestCount = 0;
@@ -2040,6 +2042,19 @@ void UInfiniteNarrativeService::IssueRequest()
 		Message->SetStringField(TEXT("content"), PromptMessage.Content);
 		Messages.Add(MakeShared<FJsonValueObject>(Message));
 	}
+	if (WriterFormatRetryAttempt > 0)
+	{
+		TSharedPtr<FJsonObject> RepairMessage = MakeShared<FJsonObject>();
+		RepairMessage->SetStringField(TEXT("role"), TEXT("user"));
+		RepairMessage->SetStringField(TEXT("content"), FString::Printf(TEXT(
+			"[输出格式纠错重试 %d/2]\n"
+			"上一份回答已经被完全丢弃，游戏状态与本地预抽的三个路由均未推进、未改变。"
+			"失败原因：%s\n"
+			"重新执行当前轮的完整剧情创作。只能返回一个完整、可解析的JSON对象；不要输出Markdown代码块、解释、前言或后记。"
+			"必须包含scene与恰好三个choices，并继续严格服从上文输出契约和已经锁定的A/B/C路由。"),
+			WriterFormatRetryAttempt, *LastWriterFormatError.Left(800)));
+		Messages.Add(MakeShared<FJsonValueObject>(RepairMessage));
+	}
 	Root->SetArrayField(TEXT("messages"), Messages);
 
 	FString Payload;
@@ -2125,7 +2140,9 @@ void UInfiniteNarrativeService::HandleHttpComplete(FHttpRequestPtr Request, FHtt
 	PendingDraftJson = ExtractTransportContent(ResponseBody).TrimStartAndEnd();
 	if (PendingDraftJson.IsEmpty())
 	{
-		CompleteWithError(TEXT("剧情导演返回空响应；本幕未推进，请重试本幕"));
+		const FString Error = TEXT("剧情导演返回空响应");
+		if (RetryWriterAfterFormatError(Error)) return;
+		CompleteWithError(TEXT("剧情导演连续返回空响应；本幕未推进，请重试本幕"));
 		return;
 	}
 	FString DraftError;
@@ -2134,7 +2151,8 @@ void UInfiniteNarrativeService::HandleHttpComplete(FHttpRequestPtr Request, FHtt
 	if (!bHasPendingDraftBeat)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] writer response is not renderable: %s"), *DraftError);
-		CompleteWithError(TEXT("剧情响应格式异常；本幕未推进，请重试本幕。日志：") + DraftError.Left(240));
+		if (RetryWriterAfterFormatError(DraftError)) return;
+		CompleteWithError(TEXT("剧情响应连续三次格式异常；本幕未推进，请重试本幕。日志：") + DraftError.Left(240));
 		return;
 	}
 	PendingDraftBeat.Diagnostic = TEXT("剧情、页面路由与状态差分由单轮导演直接生成；MVU已停用");
@@ -3018,12 +3036,12 @@ bool UInfiniteNarrativeService::ParseResponse(const FString& ResponseBody, FInfi
 	const bool bParsed = ParseModelJsonObject(Content, Root, &CleanContent);
 	if (!bParsed)
 	{
-		FString Preview = CleanContent.Left(600);
+		FString Preview = Content.Left(600);
 		Preview.ReplaceInline(TEXT("\n"), TEXT("\\n"));
 		UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] invalid content finish_reason=%s chars=%d preview=%s"),
-			*FinishReason, CleanContent.Len(), *Preview);
+			*FinishReason, Content.Len(), *Preview);
 		OutError = FString::Printf(TEXT("content 不是有效 JSON 对象（finish_reason=%s，长度=%d）"),
-			FinishReason.IsEmpty() ? TEXT("unknown") : *FinishReason, CleanContent.Len());
+			FinishReason.IsEmpty() ? TEXT("unknown") : *FinishReason, Content.Len());
 		return false;
 	}
 	const FString SchemaVersion = GetString(Root, TEXT("schema_version"));
@@ -4272,6 +4290,22 @@ bool UInfiniteNarrativeService::ReserveModelRequest(const TCHAR* PhaseLabel)
 	++TotalModelRequestCount;
 	UE_LOG(LogTemp, Display, TEXT("[InfiniteRP] model request %d/%d phase=%s"),
 		TotalModelRequestCount, MaxTotalModelRequests, PhaseLabel ? PhaseLabel : TEXT("unknown"));
+	return true;
+}
+
+bool UInfiniteNarrativeService::RetryWriterAfterFormatError(const FString& Error)
+{
+	constexpr int32 MaxWriterFormatRetries = 2;
+	if (WriterFormatRetryAttempt >= MaxWriterFormatRetries) return false;
+	++WriterFormatRetryAttempt;
+	LastWriterFormatError = Error.Left(1600);
+	PendingDraftJson.Reset();
+	PendingDraftBeat = FInfiniteNarrativeBeat();
+	bHasPendingDraftBeat = false;
+	RequestPhase = ERequestPhase::Generation;
+	UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] retrying writer format attempt=%d/%d error=%s"),
+		WriterFormatRetryAttempt, MaxWriterFormatRetries, *LastWriterFormatError);
+	IssueRequest();
 	return true;
 }
 

@@ -25,6 +25,14 @@ Saved/
 *.ipa
 *.dSYM/
 
+# Local backup snapshots created by asset replacement scripts
+Build/ArtBackup_*/
+Build/HUDBackup_*/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
 # OS and editor noise
 .DS_Store
 Thumbs.db
