@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "GameDataTypes.h"
 #include "Combat/CombatTypes.h"
+#include "Combat/CombatEngine.h"
+#include "CultivationSystem.h"
 #include "Map/MapTypes.h"
 #include "NarrativeSystem.h"
 #include "RunManager.generated.h"
@@ -150,6 +152,37 @@ struct FRunState
 	UPROPERTY(BlueprintReadOnly)
 	int32 KillStreak = 0;
 
+	/**
+	 * Persistent encounter difficulty ledger.  BattleSerial counts attempted
+	 * encounters, not victories; therefore a defeat can never rewind the next
+	 * profile.  The three Previous* values are the last authoritative profile.
+	 */
+	UPROPERTY(BlueprintReadOnly)
+	int32 BattleSerial = 0;
+
+	UPROPERTY(BlueprintReadOnly)
+	float PreviousBattleThreatScore = 0.f;
+
+	UPROPERTY(BlueprintReadOnly)
+	float PreviousBattleHPScale = 0.f;
+
+	UPROPERTY(BlueprintReadOnly)
+	float PreviousBattleIntentScale = 0.f;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString PreviousBattleTier = TEXT("none");
+
+	UPROPERTY(BlueprintReadOnly)
+	int32 PreviousBattleDifficultyStep = 0;
+
+	/** Idempotency guard: a combat victory can grant cultivation only once. */
+	UPROPERTY(BlueprintReadOnly)
+	int32 LastCultivationRewardBattleSerial = 0;
+
+	/** Per-run cultivation; no cross-run progression is implied. */
+	UPROPERTY(BlueprintReadOnly)
+	FCultivationState Cultivation;
+
 	/** 当前修道路径ID */
 	UPROPERTY(BlueprintReadOnly)
 	FString CultivatorPathId = TEXT("sword");
@@ -213,6 +246,17 @@ struct FRunState
 	UPROPERTY(BlueprintReadOnly)
 	int32 LastRPIncidentalTurn = -100000;
 
+	/** 自由 RP 提交后必须完成的一轮自动衔接；方向已锁定并可跨读档恢复。 */
+	UPROPERTY(BlueprintReadOnly)
+	bool bInfiniteFreeRPForcedJumpPending = false;
+
+	/** 自由 RP 回应已完成；等待玩家读完并点击继续后才启动自动衔接。 */
+	UPROPERTY(BlueprintReadOnly)
+	bool bInfiniteFreeRPForcedJumpAwaitingContinue = false;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString InfiniteFreeRPForcedDirection;
+
 	/** 最近一场战斗的确定性摘要；不把整份逐伤害日志塞进提示词。 */
 	UPROPERTY(BlueprintReadOnly)
 	FString LastCombatDigest;
@@ -230,7 +274,7 @@ struct FRunState
 
 	/** 引擎可直接消费的类型化 RP 状态。 */
 	UPROPERTY(BlueprintReadOnly) FString RPCurrentLocation;
-	UPROPERTY(BlueprintReadOnly) FString RPCurrentAct = TEXT("act_1");
+	UPROPERTY(BlueprintReadOnly) FString RPCurrentAct = TEXT("opening");
 	UPROPERTY(BlueprintReadOnly) TArray<FString> RPEnvironmentTraits;
 	/** -3..+3，正数利于玩家、负数利于敌人；进入下一场无限剧情战斗后消耗。 */
 	UPROPERTY(BlueprintReadOnly) int32 RPCombatEdge = 0;
@@ -256,6 +300,29 @@ struct FRunState
 	/** 选择剧情后、战斗结算前的遭遇快照，避免在获得物界面退出后跳过战斗。 */
 	UPROPERTY(BlueprintReadOnly)
 	bool bInfiniteCombatPending = false;
+
+	/**
+	 * 新局固定开场的最小恢复记录。正文由本地 opening_id/index 重建；法器 ID
+	 * 与已完成按钮文案在此锁定，读档不会重新 roll 或重新等待旧请求。
+	 */
+	UPROPERTY(BlueprintReadOnly)
+	bool bInfiniteOpeningPending = false;
+
+	UPROPERTY(BlueprintReadOnly)
+	int32 PendingInfiniteOpeningIndex = INDEX_NONE;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString PendingInfiniteOpeningId;
+
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FString> PendingInfiniteOpeningRelicIds;
+
+	/** 三条已完成按钮前缀；法器名称/说明仍由当前真实数据重建。 */
+	UPROPERTY(BlueprintReadOnly)
+	TArray<FString> PendingInfiniteOpeningChoiceTexts;
+
+	UPROPERTY(BlueprintReadOnly)
+	bool bInfiniteOpeningWordingReady = false;
 
 	UPROPERTY(BlueprintReadOnly)
 	EMapNodeType PendingInfiniteNodeType = EMapNodeType::Combat;
@@ -304,6 +371,22 @@ struct FNodeEncounter
 	/** 敌人强化等级（0=普通 1=凶 2=厉 3=煞） */
 	UPROPERTY(BlueprintReadOnly)
 	int32 EnemyLevel = 0;
+
+	/** Engine-owned difficulty ledger captured when this encounter was chosen. */
+	UPROPERTY(BlueprintReadOnly)
+	int32 BattleSerial = 0;
+
+	UPROPERTY(BlueprintReadOnly)
+	float HPScale = 1.f;
+
+	UPROPERTY(BlueprintReadOnly)
+	float IntentScale = 1.f;
+
+	UPROPERTY(BlueprintReadOnly)
+	float ThreatScore = 0.f;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString DifficultyTier = TEXT("normal");
 
 	/** 是否叙事选项（非标准地图节点） */
 	bool bIsNarrative = false;
@@ -488,6 +571,23 @@ public:
 	/** 开始新的一局 */
 	UFUNCTION(BlueprintCallable)
 	bool StartNewRun(int32 Seed, bool bInfiniteNarrative = false);
+	/** Seed used to initialize the current run's deterministic random stream. */
+	int32 GetRunSeed() const { return RunSeed; }
+
+	/**
+	 * Advance the persistent encounter ledger and return one authoritative
+	 * profile. Call exactly once when a combat encounter is committed.
+	 */
+	FCombatDifficultyProfile BeginCombatDifficulty(const TArray<FString>& EnemyIds,
+		EMapNodeType NodeType);
+	const FCombatDifficultyProfile& GetLastCombatDifficulty() const { return LastCombatDifficulty; }
+
+	/** Run-local cultivation choices and the Boss-gated Foundation transition. */
+	FCultivationVictoryResult GrantCultivationFromVictory(float AuthoritativeThreatScore);
+	FCultivationChoiceResult ApplyCultivationChoice(ECultivationChoice Choice);
+	bool TryBreakthroughAfterBoss(FString& OutMessage);
+	bool IsCultivationAtBottleneck() const { return FCultivationSystem::IsAtBottleneck(State.Cultivation); }
+	bool IsFoundationEstablished() const { return FCultivationSystem::IsFoundation(State.Cultivation); }
 
 	/** 应用经白名单验证的剧情奖励。 */
 	void ApplyInfiniteNarrativeReward(const FInfiniteNarrativeReward& Reward);
@@ -530,6 +630,16 @@ public:
 	bool RestorePendingInfiniteCombat(FNodeEncounter& OutEncounter, FString& OutResultSummary,
 		TArray<FDeckCard>& OutRewardCards, TArray<FString>& OutRewardRelics);
 	void ClearPendingInfiniteCombat();
+
+	/** 保存/恢复新局固定开场；只接受三个互异真实法器 ID 的已锁定记录。 */
+	void SavePendingInfiniteOpening(int32 OpeningIndex, const FString& OpeningId,
+		const TArray<FString>& RelicIds, const TArray<FString>& ChoiceTexts,
+		bool bWordingReady);
+	bool HasPendingInfiniteOpening() const;
+	bool RestorePendingInfiniteOpening(int32& OutOpeningIndex, FString& OutOpeningId,
+		TArray<FString>& OutRelicIds, TArray<FString>& OutChoiceTexts,
+		bool& bOutWordingReady) const;
+	void ClearPendingInfiniteOpening();
 
 	/** 战斗胜利结算（返回奖励）。bChoseKillLoot: 是否选择杀人夺宝 */
 	UFUNCTION(BlueprintCallable)
@@ -653,6 +763,7 @@ private:
 	FString CurrentEventId;
 	TArray<FShopItem> CurrentShopStock;
 	FCombatReward PendingReward;
+	FCombatDifficultyProfile LastCombatDifficulty;
 
 	void Log(const FString& Msg) const;
 	bool LoadAllData(FString& OutError);
@@ -671,6 +782,7 @@ private:
 	void ApplyEventEffect(const FEventEffect& Effect);
 	void GenerateShopStock();
 	void Breakthrough();
+	void SyncCultivationToRunRealm();
 
 	// ---------- 迷雾探索内部 ----------
 	/** 由层数推导敌人强化等级: 0-2→0, 3-5→1, 6-8→2, 9-11→3 */

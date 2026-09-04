@@ -19,7 +19,7 @@ public:
 	static const FSlateColor JadeGreen()     { return FSlateColor(FLinearColor(0.30f, 0.70f, 0.50f)); }
 	static const FSlateColor BloodRed()      { return FSlateColor(FLinearColor(0.75f, 0.22f, 0.18f)); }
 	static const FSlateColor SpiritBlue()    { return FSlateColor(FLinearColor(0.35f, 0.60f, 0.90f)); }
-	static const FSlateColor DimGray()       { return FSlateColor(FLinearColor(0.45f, 0.45f, 0.48f)); }
+	static const FSlateColor DimGray()       { return FSlateColor(FLinearColor(0.60f, 0.61f, 0.63f)); }
 	static const FSlateColor PoisonPurple()  { return FSlateColor(FLinearColor(0.60f, 0.35f, 0.75f)); }
 
 	// 按钮主题
@@ -71,6 +71,35 @@ public:
 		const int32 VisualSize = FMath::Max(8, FMath::RoundToInt(Size * 0.92f));
 		FSlateFontInfo F(*FontPath, VisualSize);
 		return F;
+	}
+
+	/**
+	 * Card typography is intentionally quantized.  A card is often laid out at a
+	 * responsive hand scale, but Slate must rasterize the text at the final
+	 * focus size instead of scaling an already-composed text widget afterwards.
+	 */
+	static int32 CardTitleFontSize(float LayoutScale)
+	{
+		if (LayoutScale >= 1.45f) return 20;
+		if (LayoutScale >= 1.18f) return 18;
+		if (LayoutScale >= 0.98f) return 16;
+		return 14;
+	}
+
+	static int32 CardDescriptionFontSize(float LayoutScale)
+	{
+		if (LayoutScale >= 1.45f) return 14;
+		if (LayoutScale >= 1.18f) return 13;
+		if (LayoutScale >= 0.98f) return 11;
+		return 10;
+	}
+
+	static int32 CardCostFontSize(float LayoutScale)
+	{
+		if (LayoutScale >= 1.45f) return 28;
+		if (LayoutScale >= 1.18f) return 25;
+		if (LayoutScale >= 0.98f) return 23;
+		return 21;
 	}
 
 	static UTextBlock* MakeText(UObject* Outer, const FString& Text, int32 Size, FSlateColor Color);

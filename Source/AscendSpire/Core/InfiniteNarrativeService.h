@@ -8,6 +8,8 @@
 #include "NarrativePromptManager.h"
 #include "InfiniteNarrativeService.generated.h"
 
+struct FNarrativeCharacterCardAsset;
+
 /** OpenAI-compatible LLM connection and presentation settings. */
 struct FInfiniteNarrativeSettings
 {
@@ -19,6 +21,8 @@ struct FInfiniteNarrativeSettings
 	bool bShowFreeformInput = false;
 	bool bShowSpeakerPortrait = true;
 	bool bEnableScreenShake = true;
+	/** Accessibility: keep impact color cues but substantially reduce full-screen flashes. */
+	bool bReduceFlashing = false;
 	bool bEnableStructuredMemory = true;
 	bool bEnableContinuityChecklist = true;
 	/** A=true: 从战斗胜利后携带完整日志推演；B=false: 战斗开始即假定胜利预演。首战始终按 B。 */
@@ -39,11 +43,27 @@ struct FInfiniteNarrativeSettings
 	bool bRequestReasoning = false;
 	bool bRequestMvuReasoning = false;
 	bool bShowReasoning = false;
+	/** User-authored request-local reasoning prefill; never persisted in chat history. */
+	bool bEnableReasoningPrefill = false;
+	/** Empty in the visible settings surface; an explicitly configured private loader may supply a hidden default. */
+	FString ReasoningPrefill;
+	/** Internal-only copied resource location; never surfaced in the settings widget or prompt diagnostics. */
+	FString HiddenReasoningPrefillPath;
+	/** Internal-only dotted JSON field path for the copied resource. */
+	FString HiddenReasoningPrefillFieldPath;
+	/** Separate opt-in for returning provider reasoning as a request-local prefill on repair. */
+	bool bEnableTemporaryReasoningPreInjection = false;
+	/** Per-copied-user-message maintenance marker; disabled copies remain byte-for-byte content. */
+	bool bMaintenanceMarkerEnabled = true;
+	FString MaintenanceMarker = TEXT("[继续遵循既定角色,关系与写作要求,直接回应本条消息]");
+	/** Independent card-forge thinking level; fast non-thinking generation is the default. */
+	FString CardForgeReasoningEffort = TEXT("disabled");
 	/** Stream the single narrative-director response and expose provisional scene text. */
 	bool bStreamResponse = true;
 	FString StopStrings;
 	float TimeoutSeconds = 180.f;
 	float SfxVolume = 0.65f;
+	float MusicVolume = 0.35f;
 	int32 InputContextTokens = 131072;
 	int32 MaxOutputTokens = 65535;
 	int32 MvuMaxOutputTokens = 32768;
@@ -68,6 +88,17 @@ struct FInfiniteNarrativeSettings
 	FString Scenario;
 	FString DialogueExamples;
 	FString AuthorNote;
+	/** Highest-priority user-authored story direction; it never overrides engine facts/output contract. */
+	FString StoryDirection;
+	bool bStoryDirectionEnabled = true;
+	/** IDs only; imported bytes live under Saved/Narrative and are loaded by the local library. */
+	FString WorldBookId;
+	bool bWorldBookEnabled = true;
+	FString CharacterCardId;
+	bool bCharacterCardEnabled = true;
+	bool bUseEmbeddedCharacterBook = true;
+	/** Explicit consent gate before imported local files may leave the game process. */
+	bool bAllowImportedContentToNarrativeModel = false;
 	/** 完整世界书覆盖；为空时读取随游戏提供的默认世界书。 */
 	FString WorldBookOverride;
 	/** 完整角色/头像注册表覆盖；为空时读取默认注册表。 */
@@ -209,6 +240,8 @@ struct FInfiniteDialogueLine
 struct FInfiniteNarrativeBeat
 {
 	FString Title;
+	/** Non-secret settings fingerprint used by the controller to reject stale prefetch beats. */
+	FString StoryDirectionCacheKey;
 	FString Speaker;
 	/** 角色头像注册表 ID；为空时由 Speaker 名称或别名匹配。 */
 	FString PortraitId;
@@ -224,6 +257,15 @@ struct FInfiniteNarrativeBeat
 	FString Diagnostic;
 };
 
+/** The three user-visible RP request phases. Freeform is followed by exactly
+ * one engine-forced jump before the input is offered again. */
+enum class EInfiniteNarrativeRequestKind : uint8
+{
+	Normal,
+	Freeform,
+	ForcedFreeRPJump
+};
+
 struct FInfiniteNarrativeRequestContext
 {
 	int32 Cycle = 0;
@@ -235,6 +277,8 @@ struct FInfiniteNarrativeRequestContext
 	/** Unique display names only. The writer never sees IDs, counts, upgrades or definitions. */
 	TArray<FString> AbilityNames;
 	TArray<FString> RelicNames;
+	/** Forge-only compact definitions of the cards and relics the player actually owns. */
+	FString CardForgeBuildSummary;
 	/** Internal-only resolvers used after the model refers to existing content by name. */
 	TMap<FString, FString> CardNameToId;
 	TMap<FString, FString> RelicNameToId;
@@ -266,10 +310,31 @@ struct FInfiniteNarrativeRequestContext
 	/** 最近连续没有进入战斗的RP轮数；用于把长期停滞显式反馈给关卡导演。 */
 	int32 NarrativeOnlyStreak = 0;
 	bool bAllowIncidentalEffect = true;
+	/** This request carries a player-authored free RP action. */
+	bool bFreeRPAction = false;
+	/** This request is the one automatic turn immediately after free RP. */
+	bool bFreeRPForcedJump = false;
+	/** Exactly one direction selected by the engine from the previous beat's choices. */
+	FString ForcedRPDirection;
 	FString FreeformAction;
+	/** A deterministic low-tier starting situation chosen locally; the writer fills in names and details. */
+	FString OpeningSeed;
+	/** Provider-returned reasoning is request-local and may be explicitly pre-injected on retry. */
+	FString TemporaryReasoningContent;
+	/** One-shot opening copy request. Only choice text may be returned; all engine facts stay local. */
+	bool bOpeningChoiceWording = false;
+	/** Opaque-to-engine prompt containing the fixed opening prose and the three bound relic slots. */
+	FString OpeningChoicePrompt;
+	/** Expected relic IDs; the opening wording response must address these IDs exactly once. */
+	TArray<FString> OpeningChoiceRelicIds;
+	/** Engine-owned metadata used only to reject accidental relic/effect leakage in copy. */
+	TArray<FString> OpeningChoiceRelicNames;
+	TArray<FString> OpeningChoiceRelicDescriptions;
+	TArray<FString> OpeningChoiceRelicRarities;
 };
 
 DECLARE_DELEGATE_TwoParams(FOnInfiniteNarrativeReady, bool, const FInfiniteNarrativeBeat&);
+DECLARE_DELEGATE_ThreeParams(FOnInfiniteOpeningWordingReady, bool, const TArray<FString>&, const FString&);
 
 enum class EInfiniteNarrativeStreamStage : uint8
 {
@@ -292,7 +357,7 @@ DECLARE_DELEGATE_ThreeParams(FOnInfiniteCardForgeReady, bool, const FCardData&, 
 
 /**
  * Async OpenAI-compatible client. One narrative call writes the scene and three choices;
- * the independent card forge is invoked only after a card-forge choice is selected.
+ * the bounded card-design agent is invoked only after a card-forge choice is selected.
  */
 UCLASS()
 class ASCENDSPIRE_API UInfiniteNarrativeService : public UObject
@@ -300,10 +365,21 @@ class ASCENDSPIRE_API UInfiniteNarrativeService : public UObject
 	GENERATED_BODY()
 
 public:
+	/** Returns a non-secret fingerprint for the literary-direction settings only. */
+	static FString BuildStoryDirectionCacheKey(const FInfiniteNarrativeSettings& Settings);
+	/** Conservative display-safety gate for fixed-opening copy; it never changes engine facts. */
+	static bool IsOpeningChoiceWordingSafe(const FString& Text, const FString& RelicId,
+		const FString& RelicName, const FString& RelicDescription, const FString& RelicRarity);
+
 	void Generate(const FInfiniteNarrativeSettings& Settings,
 		const FInfiniteNarrativeRequestContext& Context,
 		FOnInfiniteNarrativeReady Completion,
 		FOnInfiniteNarrativeStreamUpdate StreamUpdate = FOnInfiniteNarrativeStreamUpdate());
+
+	/** One-shot copy pass for a fixed opening. It cannot modify routes, rewards, relics or enemies. */
+	void GenerateOpeningChoiceWording(const FInfiniteNarrativeSettings& Settings,
+		const FInfiniteNarrativeRequestContext& Context,
+		FOnInfiniteOpeningWordingReady Completion);
 
 	/** Cancel the current request and invalidate every queued callback or stream chunk. */
 	void CancelGeneration();
@@ -318,11 +394,26 @@ public:
 		FString& OutError) const;
 	/** Headless hook for verifying partial JSON scene extraction used by SSE previews. */
 	FInfiniteNarrativeBeat ParseStreamingPreviewForAutomationTest(const FString& PartialContent) const;
+	/** Headless hook for verifying opening copy stays bound to the three locked relic IDs. */
+	bool ParseOpeningWordingForAutomationTest(const FString& ResponseBody,
+		const TArray<FString>& ExpectedRelicIds, TArray<FString>& OutTexts, FString& OutError) const;
+	/** Headless hook with public relic metadata to exercise the no-leak safety gate. */
+	bool ParseOpeningWordingForAutomationTest(const FString& ResponseBody,
+		const TArray<FString>& ExpectedRelicIds, const TArray<FString>& ExpectedRelicNames,
+		const TArray<FString>& ExpectedRelicDescriptions, const TArray<FString>& ExpectedRelicRarities,
+		TArray<FString>& OutTexts, FString& OutError) const;
 	/** Headless hook for verifying writer/MVU isolation and branch overlay. */
 	bool MergeCompilerResponseForAutomationTest(const FString& DraftJson, const FString& CompilerResponse,
 		FInfiniteNarrativeBeat& OutBeat, FString& OutError);
 	bool ParseForgedCardForAutomationTest(const FString& ResponseBody, int32 Cycle,
 		FCardData& OutCard, FString& OutError) const;
+	/** Headless hook for the same lightweight dry-run tool used by the card agent. */
+	bool TestCardForgeCandidateForAutomationTest(const FString& Script, int32 Cycle,
+		FCardData& OutCard, FString& OutFeedback) const;
+	/** Headless hook for the bounded agent's JSON tool protocol. */
+	bool ParseCardForgeAgentStepForAutomationTest(const FString& ResponseBody, FString& OutAction,
+		FString& OutIntendedText, FString& OutScript, FString& OutImplementationCheck,
+		FString& OutPowerCheck, FString& OutContent, FString& OutError) const;
 	/** Deterministic local route planner hook; no model request and no game-state mutation. */
 	TArray<FString> PlanRoutesForAutomationTest(const FInfiniteNarrativeRequestContext& Context,
 		int32 Seed, TArray<FString>* OutPayloads = nullptr,
@@ -337,12 +428,14 @@ private:
 	{
 		Generation,
 		StateCompilation,
-		CardForge
+		CardForge,
+		OpeningWording
 	};
 
 	TSharedPtr<IHttpRequest, ESPMode::ThreadSafe> ActiveRequest;
 	uint64 GenerationSerial = 0;
 	FOnInfiniteNarrativeReady PendingCompletion;
+	FOnInfiniteOpeningWordingReady PendingOpeningWordingCompletion;
 	FOnInfiniteNarrativeStreamUpdate PendingStreamUpdate;
 	FOnInfiniteCardForgeReady PendingCardForgeCompletion;
 	FInfiniteNarrativeRequestContext PendingContext;
@@ -364,10 +457,23 @@ private:
 	/** Additional writer calls after an otherwise successful HTTP response cannot be parsed. */
 	int32 WriterFormatRetryAttempt = 0;
 	FString LastWriterFormatError;
+	/** Provider compatibility fallback: retry one time after rejecting reasoning_content. */
+	bool bReasoningContentFallbackAttempted = false;
 	int32 MvuTokenCapAttempt = 0;
 	int32 MvuSemanticRetryAttempt = 0;
 	int32 TotalModelRequestCount = 0;
+	/** Number of model turns spent by the bounded card-design agent. Usually one; repairs use the remainder. */
 	int32 CardForgeAttempt = 0;
+	TArray<FNarrativePromptMessage> CardForgeMessages;
+	FString CardForgeLastToolFeedback;
+	/** Short story-to-mechanics target written before implementation; repairs should preserve it. */
+	FString CardForgeIntendedText;
+	/** A mechanically valid candidate awaiting the same agent's semantic and power review. */
+	FCardData CardForgePendingCandidate;
+	bool bCardForgeAwaitingReview = false;
+	/** Diagnostics only; never used as a workflow cutoff. */
+	double CardForgeWorkflowStartedAt = 0.0;
+	double CardForgeRequestStartedAt = 0.0;
 	FInfiniteCardForgeJob PendingCardForgeJob;
 	FString LastCardForgeError;
 	FString LastMvuValidationError;
@@ -390,6 +496,12 @@ private:
 	double LastWriterStreamUpdateAt = 0.0;
 
 	void IssueRequest();
+	FString ResolveEffectiveReasoningPrefill(const FInfiniteNarrativeSettings& Settings) const;
+	void IssueOpeningWordingRequest();
+	void HandleOpeningWordingComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
+	bool ParseOpeningWordingResponse(const FString& ResponseBody, TArray<FString>& OutTexts,
+		FString& OutError) const;
+	void CompleteOpeningWording(bool bSuccess, const TArray<FString>& Texts, const FString& Diagnostic);
 	void PrepareChoiceRoutePlan();
 	FString DescribeChoiceRoutePlanForPrompt() const;
 	void ApplyChoiceRoutePlan(FInfiniteNarrativeChoice& Choice, int32 ChoiceSlot) const;
@@ -398,6 +510,8 @@ private:
 	void ProcessWriterSseLine(const FString& Line);
 	void QueueWriterStreamUpdate();
 	void EmitWriterStreamUpdate();
+	/** Emit one unthrottled terminal snapshot before the ready callback can unbind it. */
+	void FlushWriterStreamUpdate(const FInfiniteNarrativeBeat& FinalBeat);
 	void EmitStreamStage(EInfiniteNarrativeStreamStage Stage);
 	FString BuildWriterStreamTransportResponse();
 	void ResetWriterStreamState();
@@ -405,6 +519,13 @@ private:
 	void HandleStateCompilationComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
 	void IssueCardForgeRequest();
 	void HandleCardForgeComplete(FHttpRequestPtr Request, FHttpResponsePtr Response, bool bSucceeded);
+	bool ParseCardForgeAgentStep(const FString& ResponseBody, FString& OutAction,
+		FString& OutIntendedText, FString& OutScript, FString& OutImplementationCheck,
+		FString& OutPowerCheck, FString& OutContent, FString& OutError) const;
+	FString LoadCardForgeWorldBook() const;
+	FString BuildCardForgeContext() const;
+	bool TestCardForgeCandidate(const FString& Script, FCardData& OutCard, FString& OutFeedback) const;
+	void AppendCardForgeMessage(const FString& Role, const FString& Content);
 	bool ParseForgedCard(const FString& ResponseBody, FCardData& OutCard, FString& OutError) const;
 	void CompleteCardForge(bool bSuccess, const FCardData& Card, const FString& Diagnostic);
 	bool MergeCompilerResponse(const FString& ResponseBody, FInfiniteNarrativeBeat& OutBeat, FString& OutError) const;
@@ -423,6 +544,8 @@ private:
 	FString LoadCapabilityManifest() const;
 	FString LoadWorldBook() const;
 	FString LoadCharacterRegistry() const;
+	bool LoadSelectedCharacterCard(FNarrativeCharacterCardAsset& OutAsset) const;
+	FString BuildCharacterCardPrompt(const FNarrativeCharacterCardAsset& Asset) const;
 	FString LoadTriggeredAuthoringKnowledge(const FInfiniteNarrativeRequestContext& Context,
 		bool bForceFullManual = false, const FString& DraftOverride = FString()) const;
 	void CompleteWithError(const FString& Diagnostic);

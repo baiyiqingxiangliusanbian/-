@@ -72,6 +72,24 @@ namespace
 		return TEXT("?");
 	}
 
+	FString CultivationStatusText(const FCultivationState& Cultivation)
+	{
+		if (Cultivation.bFoundationEstablished || Cultivation.RealmIndex >= FCultivationSystem::FoundationRealm)
+		{
+			return FString::Printf(TEXT("当前境界：%s　修为：%d　道基已成"),
+				*Cultivation.RealmName, Cultivation.CultivationPoints);
+		}
+		if (Cultivation.bAtBottleneck)
+		{
+			return FString::Printf(TEXT("当前境界：%s　修为：%d　瓶颈：击败首领后方可筑基"),
+				*Cultivation.RealmName, Cultivation.CultivationPoints);
+		}
+		const int32 Remaining = FMath::Max(0, Cultivation.NextThreshold - Cultivation.CultivationPoints);
+		return FString::Printf(TEXT("当前境界：%s　修为：%d　下一层阈值：%d（还差%d）"),
+			*Cultivation.RealmName, Cultivation.CultivationPoints,
+			Cultivation.NextThreshold, Remaining);
+	}
+
 
 
 	UWidget* MakeHPBar(UObject* Outer, int32 HP, int32 MaxHP, FLinearColor Color)
@@ -80,6 +98,38 @@ namespace
 		Bar->SetPercent(MaxHP > 0 ? (float)HP / MaxHP : 0.f);
 		Bar->SetFillColorAndOpacity(Color);
 		return Bar;
+	}
+
+	UWidget* MakeNarrativeReadingPanel(UObject* Outer, const FString& Text, int32 FontSize = 21)
+	{
+		USizeBox* Width = NewObject<USizeBox>(Outer);
+		Width->SetWidthOverride(1040.f);
+		Width->SetMinDesiredHeight(132.f);
+		UBorder* Panel = NewObject<UBorder>(Width);
+		if (UTexture2D* Texture = FAscendArt::GetTexture(Panel, TEXT("Art/ui/chat_bubble.png")))
+		{
+			FSlateBrush Brush;
+			Brush.SetResourceObject(Texture);
+			Brush.DrawAs = ESlateBrushDrawType::Box;
+			Brush.Margin = FMargin(0.065f, 0.19f);
+			Brush.ImageSize = FVector2D(1024.f, 409.f);
+			Panel->SetBrush(Brush);
+			Panel->SetBrushColor(FLinearColor::White);
+		}
+		else
+		{
+			Panel->SetBrushColor(FLinearColor(0.035f, 0.055f, 0.06f, 0.96f));
+		}
+		Panel->SetPadding(FMargin(70.f, 30.f, 70.f, 32.f));
+		UTextBlock* Body = Style::MakeText(Panel, Text, FontSize, Style::PaperWhite());
+		Body->SetAutoWrapText(true);
+		Body->SetWrapTextAt(880.f);
+		Body->SetJustification(ETextJustify::Left);
+		Body->SetShadowOffset(FVector2D(1.f, 1.f));
+		Body->SetShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.65f));
+		Panel->SetContent(Body);
+		Width->SetContent(Panel);
+		return Width;
 	}
 }
 
@@ -270,7 +320,7 @@ void AAscendPlayerController::ShowStartRelicChoice()
 	Row->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
 	AddToVBox(Box, Row);
 
-	SetScreen(Box, EGameScreen::Title);
+	SetScreen(Box, EGameScreen::Title, TEXT("bgm_card_discovery"));
 }
 
 // -----------------------------------------------------------
@@ -612,8 +662,8 @@ void AAscendPlayerController::RefreshCombatPanel()
 	// 不再依靠 Overlay Padding 反推大小，避免头像方角或拉伸穿出圆孔。
 	{
 		USizeBox* HPCluster = NewObject<USizeBox>(BottomRow);
-		HPCluster->SetWidthOverride(430.f);
-		HPCluster->SetHeightOverride(134.f);
+		HPCluster->SetWidthOverride(507.f);
+		HPCluster->SetHeightOverride(158.f);
 		UCanvasPanel* HPVisual = NewObject<UCanvasPanel>(HPCluster);
 
 		if (UImage* AvatarImg = FAscendArt::MakeImage(HPVisual, TEXT("Art/avatar/player_cultivator_v2_hud.png")))
@@ -623,8 +673,8 @@ void AAscendPlayerController::RefreshCombatPanel()
 			{
 				// hud_hp_panel 的透明内窗在原图 (58,38)-(317,218)，
 				// 按 430x134 等比换算后正好是下面这块 109x75 椭圆区域。
-				AvatarSlot->SetPosition(FVector2D(24.f, 16.f));
-				AvatarSlot->SetSize(FVector2D(109.f, 75.f));
+				AvatarSlot->SetPosition(FVector2D(28.f, 19.f));
+				AvatarSlot->SetSize(FVector2D(129.f, 89.f));
 				AvatarSlot->SetZOrder(0);
 			}
 		}
@@ -635,7 +685,7 @@ void AAscendPlayerController::RefreshCombatPanel()
 			if (UCanvasPanelSlot* FrameSlot = HPVisual->AddChildToCanvas(HPFrame))
 			{
 				FrameSlot->SetPosition(FVector2D::ZeroVector);
-				FrameSlot->SetSize(FVector2D(430.f, 134.f));
+				FrameSlot->SetSize(FVector2D(507.f, 158.f));
 				FrameSlot->SetZOrder(10);
 			}
 		}
@@ -650,19 +700,19 @@ void AAscendPlayerController::RefreshCombatPanel()
 		HPBarBg->SetContent(HPBar);
 		if (UCanvasPanelSlot* BarSlot = HPVisual->AddChildToCanvas(HPBarBg))
 		{
-			BarSlot->SetPosition(FVector2D(162.f, 82.f));
-			BarSlot->SetSize(FVector2D(220.f, 19.f));
+			BarSlot->SetPosition(FVector2D(191.f, 97.f));
+			BarSlot->SetSize(FVector2D(260.f, 22.f));
 			BarSlot->SetZOrder(20);
 		}
 
 		UTextBlock* HPText = Style::MakeText(HPVisual,
-			FString::Printf(TEXT("%d / %d"), Combat->Player.HP, Combat->Player.MaxHP), 24, Style::PaperWhite());
+			FString::Printf(TEXT("%d / %d"), Combat->Player.HP, Combat->Player.MaxHP), 27, Style::PaperWhite());
 		HPText->SetJustification(ETextJustify::Center);
 		HPText->SetShadowOffset(FVector2D(1.f, 1.f));
 		if (UCanvasPanelSlot* TextSlot = HPVisual->AddChildToCanvas(HPText))
 		{
-			TextSlot->SetPosition(FVector2D(158.f, 32.f));
-			TextSlot->SetSize(FVector2D(234.f, 40.f));
+			TextSlot->SetPosition(FVector2D(186.f, 38.f));
+			TextSlot->SetSize(FVector2D(276.f, 47.f));
 			TextSlot->SetZOrder(20);
 		}
 
@@ -957,6 +1007,13 @@ void AAscendPlayerController::RefreshCombatPanel()
 				(Combat->GetEffectiveCost(Combat->Hand[i]) <= Combat->Spirit);
 
 			UButton* CardBtn = NewObject<UButton>(HandLayer);
+			// Do not let SButton capture the Android pointer. With Down/MouseDown
+			// the press still starts the drag, while subsequent moves reach the root
+			// widget and the PlayerController even after leaving the card bounds.
+#if PLATFORM_ANDROID
+			CardBtn->SetTouchMethod(EButtonTouchMethod::Down);
+			CardBtn->SetClickMethod(EButtonClickMethod::MouseDown);
+#endif
 			BuildCardWidget(CardBtn, i, bPlayable, CurrentHandCardScale);
 			if (!bPlayable) CardBtn->SetIsEnabled(false);
 
@@ -967,11 +1024,10 @@ void AAscendPlayerController::RefreshCombatPanel()
 			Proxy->Tag = TEXT("hand_card");
 			Proxy->Index = i;
 			Proxy->Owner = this;
+			// Keep OnPressed as the reliable card hit-test fallback. Android also
+			// receives the viewport touch lifecycle; HandleCardPressed is idempotent
+			// so the two paths cannot cancel each other.
 			CardBtn->OnPressed.AddDynamic(Proxy, &UClickProxy::HandlePress);
-#if PLATFORM_ANDROID
-			// 触摸控件负责捕获手指释放；桌面端由 PlayerController 的鼠标释放统一处理。
-			CardBtn->OnReleased.AddDynamic(Proxy, &UClickProxy::HandleRelease);
-#endif
 			PendingScreenProxies.Add(Proxy);
 
 			UClickProxy* HoverProxy = NewObject<UClickProxy>(CardBtn);
@@ -1089,6 +1145,45 @@ void AAscendPlayerController::ShowReward()
 	UVerticalBox* Box = NewObject<UVerticalBox>(RootWidget);
 	Pad(Box, 80);
 
+	// Cultivation is a run-local reward that must stay visible until every
+	// queued realm-upgrade choice is claimed.  Keep this panel in the reward
+	// flow so a card/loot click can never silently discard pending choices.
+	auto AddCultivationStatus = [this, Box](bool bShowChoiceButtons)
+	{
+		if (!Run) return;
+		const FCultivationState& Cultivation = Run->State.Cultivation;
+		FString StatusText = CultivationStatusText(Cultivation);
+		if (Cultivation.PendingChoiceCount > 0)
+		{
+			StatusText += FString::Printf(TEXT("\n待领取修炼奖励：%d 次（领取后才能离开奖励页）"),
+				Cultivation.PendingChoiceCount);
+		}
+		UTextBlock* Status = Style::MakeText(Box, StatusText, 16,
+			Cultivation.PendingChoiceCount > 0 ? Style::GoldYellow() : Style::JadeGreen());
+		Status->SetJustification(ETextJustify::Center);
+		Status->SetAutoWrapText(true);
+		Status->SetWrapTextAt(1000.f);
+		AddToVBox(Box, Status, FMargin(24.f, 4.f));
+
+		if (!bShowChoiceButtons || Cultivation.PendingChoiceCount <= 0) return;
+		UTextBlock* ChoiceHint = Style::MakeText(Box,
+			TEXT("—— 境界已突破：选择一项修炼奖励 ——"), 17, Style::GoldYellow());
+		ChoiceHint->SetJustification(ETextJustify::Center);
+		AddToVBox(Box, ChoiceHint, FMargin(6.f, 10.f, 6.f, 4.f));
+		UHorizontalBox* ChoiceRow = NewObject<UHorizontalBox>(Box);
+		ChoiceRow->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		static const TCHAR* ChoiceLabels[] = {
+			TEXT("【锻体】气血上限 +2"), TEXT("【纳气】灵气储备 +1"), TEXT("【悟法】悟法次数 +1")
+		};
+		for (int32 ChoiceIndex = 0; ChoiceIndex < 3; ++ChoiceIndex)
+		{
+			AddToHBox(ChoiceRow, MakeLinkedButton(ChoiceRow, ChoiceLabels[ChoiceIndex],
+				TEXT("cultivation_choice"), ChoiceIndex, 16), FMargin(8.f, 0.f));
+		}
+		ChoiceRow->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		AddToVBox(Box, ChoiceRow, FMargin(6.f, 0.f, 6.f, 8.f));
+	};
+
 	// 精英战杀人夺宝抉择
 	if (bPendingKillLootChoice)
 	{
@@ -1105,6 +1200,8 @@ void AAscendPlayerController::ShowReward()
 		Desc->SetJustification(ETextJustify::Center);
 		AddToVBox(Box, Desc);
 		Pad(Box, 30);
+		AddCultivationStatus(false);
+		Pad(Box, 8);
 
 		UHorizontalBox* Row = NewObject<UHorizontalBox>(Box);
 		Row->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
@@ -1131,8 +1228,15 @@ void AAscendPlayerController::ShowReward()
 	Loot->SetJustification(ETextJustify::Center);
 	AddToVBox(Box, Loot);
 	Pad(Box, 20);
+	AddCultivationStatus(true);
+	Pad(Box, 10);
 
-	UTextBlock* PickHint = Style::MakeText(Box, TEXT("—— 选择一张卡牌加入卡组 ——"), 18, Style::JadeGreen());
+	const bool bCultivationBlocking = Run && Run->State.Cultivation.PendingChoiceCount > 0;
+	UTextBlock* PickHint = Style::MakeText(Box,
+		bCultivationBlocking
+			? TEXT("—— 请先领取修炼奖励，再选择一张卡牌加入卡组 ——")
+			: TEXT("—— 选择一张卡牌加入卡组 ——"),
+		18, bCultivationBlocking ? Style::GoldYellow() : Style::JadeGreen());
 	PickHint->SetJustification(ETextJustify::Center);
 	AddToVBox(Box, PickHint);
 	Pad(Box, 10);
@@ -1153,6 +1257,7 @@ void AAscendPlayerController::ShowReward()
 			}
 			Pad(CardBox, 4);
 			UButton* Btn = MakeLinkedButton(CardBox, TEXT("【选择】"), TEXT("reward"), i, 16);
+			if (bCultivationBlocking) Btn->SetIsEnabled(false);
 			AddToVBox(CardBox, Btn, FMargin(0.f));
 			AddToHBox(Row, CardBox, FMargin(12.f, 0.f));
 		}
@@ -1163,7 +1268,9 @@ void AAscendPlayerController::ShowReward()
 
 	UHorizontalBox* SkipRow = NewObject<UHorizontalBox>(Box);
 	SkipRow->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-	AddToHBox(SkipRow, MakeLinkedButton(SkipRow, TEXT("【跳过】"), TEXT("reward_skip"), 0, 18));
+	UButton* SkipButton = MakeLinkedButton(SkipRow, TEXT("【跳过】"), TEXT("reward_skip"), 0, 18);
+	if (bCultivationBlocking) SkipButton->SetIsEnabled(false);
+	AddToHBox(SkipRow, SkipButton);
 	SkipRow->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
 	AddToVBox(Box, SkipRow);
 
@@ -1423,27 +1530,38 @@ void AAscendPlayerController::ShowNarrative()
 	const FNarrativeBeat Beat = Run->GetCurrentNarrativeBeat();
 
 	UVerticalBox* Box = NewObject<UVerticalBox>(RootWidget);
-	Pad(Box, 60);
+	Pad(Box, 70);
+	UTextBlock* Title = Style::MakeText(Box, TEXT("尘 缘 一 瞬"), 32, Style::GoldYellow());
+	Title->SetJustification(ETextJustify::Center);
+	AddToVBox(Box, Title, FMargin(0.f, 0.f, 0.f, 12.f));
 
-	// 叙述文本（居中，自动换行）
-	UTextBlock* Narrator = Style::MakeText(Box, Beat.NarratorText, 20, Style::PaperWhite());
-	Narrator->SetJustification(ETextJustify::Center);
-	Narrator->SetAutoWrapText(true);
-	AddToVBox(Box, Narrator, FMargin(80.f, 20.f));
-	Pad(Box, 30);
+	UHorizontalBox* StoryRow = NewObject<UHorizontalBox>(Box);
+	StoryRow->AddChildToHorizontalBox(NewObject<USpacer>(StoryRow))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+	AddToHBox(StoryRow, MakeNarrativeReadingPanel(StoryRow, Beat.NarratorText));
+	StoryRow->AddChildToHorizontalBox(NewObject<USpacer>(StoryRow))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+	AddToVBox(Box, StoryRow, FMargin(24.f, 0.f, 24.f, 18.f));
 
 	// 选项
+	UButton* FirstChoice = nullptr;
 	for (int32 i = 0; i < Beat.Choices.Num(); ++i)
 	{
 		UHorizontalBox* Row = NewObject<UHorizontalBox>(Box);
 		Row->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-		AddToHBox(Row, MakeLinkedButton(Row,
-			FString::Printf(TEXT("【%s】"), *Beat.Choices[i].Text), TEXT("node"), i, 20));
+		UButton* Choice = MakeLinkedButton(Row,
+			FString::Printf(TEXT("%d　%s"), i + 1, *Beat.Choices[i].Text), TEXT("node"), i, 20);
+		if (!FirstChoice) FirstChoice = Choice;
+		AddToHBox(Row, Choice);
 		Row->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
 		AddToVBox(Box, Row, FMargin(0.f, 8.f));
 	}
 
 	SetScreen(Box, EGameScreen::Event);
+	if (FirstChoice && GetWorld())
+	{
+		TWeakObjectPtr<UButton> WeakFirst(FirstChoice);
+		GetWorld()->GetTimerManager().SetTimerForNextTick(FTimerDelegate::CreateWeakLambda(this,
+			[WeakFirst]() { if (WeakFirst.IsValid()) WeakFirst->SetKeyboardFocus(); }));
+	}
 }
 
 void AAscendPlayerController::ShowNarrativeOutcome()
@@ -1458,10 +1576,11 @@ void AAscendPlayerController::ShowNarrativeOutcome()
 	AddToVBox(Box, Title);
 	Pad(Box, 20);
 
-	UTextBlock* Summary = Style::MakeText(Box, Run->PendingNarrativeSummary, 20, Style::PaperWhite());
-	Summary->SetJustification(ETextJustify::Center);
-	Summary->SetAutoWrapText(true);
-	AddToVBox(Box, Summary, FMargin(80.f, 20.f));
+	UHorizontalBox* SummaryRow = NewObject<UHorizontalBox>(Box);
+	SummaryRow->AddChildToHorizontalBox(NewObject<USpacer>(SummaryRow))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+	AddToHBox(SummaryRow, MakeNarrativeReadingPanel(SummaryRow, Run->PendingNarrativeSummary));
+	SummaryRow->AddChildToHorizontalBox(NewObject<USpacer>(SummaryRow))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+	AddToVBox(Box, SummaryRow, FMargin(24.f, 10.f, 24.f, 0.f));
 	Pad(Box, 30);
 
 	// 确定后进入游戏节点
@@ -1621,12 +1740,55 @@ void AAscendPlayerController::ShowRest()
 		18, Style::PaperWhite());
 	Desc->SetJustification(ETextJustify::Center);
 	AddToVBox(Box, Desc);
-	Pad(Box, 30);
+	Pad(Box, 16);
+
+	const FCultivationState& Cultivation = Run->State.Cultivation;
+	const bool bCultivationBlocking = Cultivation.PendingChoiceCount > 0;
+	FString CultivationText = CultivationStatusText(Cultivation);
+	if (bCultivationBlocking)
+	{
+		CultivationText += FString::Printf(TEXT("\n待领取修炼奖励：%d 次（先领取后才能调息）"),
+			Cultivation.PendingChoiceCount);
+	}
+	UTextBlock* CultivationStatus = Style::MakeText(Box, CultivationText, 16,
+		bCultivationBlocking ? Style::GoldYellow() : Style::JadeGreen());
+	CultivationStatus->SetJustification(ETextJustify::Center);
+	CultivationStatus->SetAutoWrapText(true);
+	CultivationStatus->SetWrapTextAt(1000.f);
+	AddToVBox(Box, CultivationStatus, FMargin(24.f, 4.f));
+
+	if (bCultivationBlocking)
+	{
+		UTextBlock* ChoiceHint = Style::MakeText(Box,
+			TEXT("—— 境界已突破：选择一项修炼奖励 ——"), 17, Style::GoldYellow());
+		ChoiceHint->SetJustification(ETextJustify::Center);
+		AddToVBox(Box, ChoiceHint, FMargin(6.f, 10.f, 6.f, 4.f));
+		UHorizontalBox* ChoiceRow = NewObject<UHorizontalBox>(Box);
+		ChoiceRow->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		static const TCHAR* ChoiceLabels[] = {
+			TEXT("【锻体】气血上限 +2"), TEXT("【纳气】灵气储备 +1"), TEXT("【悟法】悟法次数 +1")
+		};
+		for (int32 ChoiceIndex = 0; ChoiceIndex < 3; ++ChoiceIndex)
+		{
+			AddToHBox(ChoiceRow, MakeLinkedButton(ChoiceRow, ChoiceLabels[ChoiceIndex],
+				TEXT("cultivation_choice"), ChoiceIndex, 16), FMargin(8.f, 0.f));
+		}
+		ChoiceRow->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+		AddToVBox(Box, ChoiceRow, FMargin(6.f, 0.f, 6.f, 8.f));
+	}
+	Pad(Box, 14);
 
 	UHorizontalBox* Row = NewObject<UHorizontalBox>(Box);
 	Row->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
-	AddToHBox(Row, MakeLinkedButton(Row, TEXT("【调息疗伤及恢复55%气血】"), TEXT("rest_heal"), 0, 20));
-	AddToHBox(Row, MakeLinkedButton(Row, TEXT("【悟道修炼·随机升级一张牌】"), TEXT("rest_upgrade"), 0, 20));
+	UButton* HealButton = MakeLinkedButton(Row, TEXT("【调息疗伤及恢复55%气血】"), TEXT("rest_heal"), 0, 20);
+	UButton* UpgradeButton = MakeLinkedButton(Row, TEXT("【悟道修炼·随机升级一张牌】"), TEXT("rest_upgrade"), 0, 20);
+	if (bCultivationBlocking)
+	{
+		HealButton->SetIsEnabled(false);
+		UpgradeButton->SetIsEnabled(false);
+	}
+	AddToHBox(Row, HealButton);
+	AddToHBox(Row, UpgradeButton);
 	Row->AddChildToHorizontalBox(NewObject<USpacer>(Box))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
 	AddToVBox(Box, Row);
 

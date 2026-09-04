@@ -4,9 +4,33 @@
 #include "Blueprint/UserWidget.h"
 #include "CombatSlashWidget.generated.h"
 
+/** 卡牌命中特效族。所有样式共用同一个轻量 Slate 绘制器，但拥有独立构图和时间轴。 */
+UENUM(BlueprintType)
+enum class ECombatStrikeStyle : uint8
+{
+	ArcSlash,
+	Greatsword,
+	MyriadSwords,
+	SwordWave,
+	Thunder,
+	FlameBurst,
+	Poison,
+	Ward,
+	SpiritFlow,
+	PowerAura,
+	Talisman,
+	Seal,
+	CurseBurst,
+	ImpactBurst
+};
+
 /**
- * 轻量 Slate 自绘剑光：用多层曲线、辉光和火星替代两根粗白矩形。
- * 它没有贴图依赖，适合先快速迭代表现层，后续也可替换为 Niagara/贴图特效。
+ * 程序化卡牌命中特效。
+ *
+ * 旧版本只画一条等宽曲线，所有剑牌看起来都像临时占位线。本控件改为四套
+ * 可辨识的视觉语汇：剑系的弧斩、巨剑、万剑、剑气波，以及雷、火、毒、
+ * 护盾、聚灵、功法气场、符箓、状态印记和诅咒爆发。每套都有独立构图、
+ * 时间轴和多层辉光，不再依赖一条临时占位线。
  */
 UCLASS()
 class ASCENDSPIRE_API UCombatSlashWidget : public UUserWidget
@@ -22,6 +46,17 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	float Rotation = 0.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	ECombatStrikeStyle StrikeStyle = ECombatStrikeStyle::ArcSlash;
+
+	/** 0.5~2.0，控制刃宽、辉光和冲击波规模。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	float Strength = 1.f;
+
+	/** 让多次同类特效仍保持稳定但略有差异，不使用逐帧随机数。 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite)
+	int32 Variant = 0;
 
 	void SetSlashProgress(float InProgress)
 	{

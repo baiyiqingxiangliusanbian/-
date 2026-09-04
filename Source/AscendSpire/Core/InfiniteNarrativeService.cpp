@@ -1,6 +1,9 @@
 #include "InfiniteNarrativeService.h"
+#include "NarrativeContentLibrary.h"
 
 #include "CardScriptCompiler.h"
+#include "Combat/CombatEngine.h"
+#include "PrivateReasoningPrefillLoader.h"
 
 #include "GameDataLibrary.h"
 #include "Async/Async.h"
@@ -21,6 +24,29 @@
 
 namespace
 {
+	// Card authoring is deliberately bounded by model turns, not by a short wall-clock
+	// deadline. A slow provider must be allowed to finish a turn; only a genuinely stalled
+	// request should end it. The turn cap still prevents invalid-agent loops from burning tokens.
+	// The normal path is one model call. Seven additional calls are available for
+	// actionable compile/runtime repairs; soft design warnings never prolong the player's wait.
+	// One extra turn is deliberately reserved for inspecting the engine-generated card face
+	// before accepting it; the remaining turns are cheap implementation repairs.
+	constexpr int32 CardForgeMaxTurns = 10;
+	constexpr float CardForgeNoResponseTimeoutSeconds = 300.f;
+	constexpr int32 CardForgeMaxMessageChars = 30000;
+	constexpr int32 CardForgeMaxFeedbackChars = 6000;
+
+	FString NormalizeCardForgeReasoningEffort(FString Effort)
+	{
+		Effort.TrimStartAndEndInline();
+		Effort.ToLowerInline();
+		Effort.ReplaceInline(TEXT("-"), TEXT("_"));
+		if (Effort == TEXT("off") || Effort == TEXT("none")) Effort = TEXT("disabled");
+		return Effort == TEXT("disabled") || Effort == TEXT("low") || Effort == TEXT("medium")
+			|| Effort == TEXT("high") || Effort == TEXT("max") || Effort == TEXT("auto")
+			? Effort : TEXT("disabled");
+	}
+
 	FString ResolveChatCompletionsUrl(FString Endpoint)
 	{
 		Endpoint.TrimStartAndEndInline();
@@ -53,12 +79,20 @@ namespace
 		if (!bBaseValid) return EngineRouteJson;
 
 		TArray<TSharedPtr<FJsonValue>> CombinedEntries;
-		const TArray<TSharedPtr<FJsonValue>>* BaseEntries = nullptr;
-		if (BaseRoot->TryGetArrayField(TEXT("entries"), BaseEntries) && BaseEntries)
-			CombinedEntries.Append(*BaseEntries);
-		const TArray<TSharedPtr<FJsonValue>>* RouteEntries = nullptr;
-		if (RouteRoot->TryGetArrayField(TEXT("entries"), RouteEntries) && RouteEntries)
-			CombinedEntries.Append(*RouteEntries);
+		auto AppendEntries = [&CombinedEntries](const TSharedPtr<FJsonObject>& Root)
+		{
+			const TArray<TSharedPtr<FJsonValue>>* ArrayEntries = nullptr;
+			if (Root->TryGetArrayField(TEXT("entries"), ArrayEntries) && ArrayEntries)
+			{
+				CombinedEntries.Append(*ArrayEntries);
+				return;
+			}
+			const TSharedPtr<FJsonObject>* ObjectEntries = nullptr;
+			if (Root->TryGetObjectField(TEXT("entries"), ObjectEntries) && ObjectEntries && ObjectEntries->IsValid())
+				for (const auto& Pair : (*ObjectEntries)->Values) CombinedEntries.Add(Pair.Value);
+		};
+		AppendEntries(BaseRoot);
+		AppendEntries(RouteRoot);
 		BaseRoot->SetArrayField(TEXT("entries"), CombinedEntries);
 		return JsonString(BaseRoot);
 	}
@@ -775,6 +809,22 @@ namespace
 			OutError = TEXT("effect.max_triggers 必须在0~99");
 			return false;
 		}
+		const bool bCanImmediatelyRetriggerItself =
+			((Trigger == TEXT("on_damage_dealt") || Trigger == TEXT("before_deal_damage"))
+				&& (Action.StartsWith(TEXT("damage"))))
+			|| ((Trigger == TEXT("before_gain_block") || Trigger == TEXT("after_gain_block"))
+				&& (Action == TEXT("block") || Action == TEXT("block_per_status")))
+			|| (Trigger == TEXT("on_draw") && (Action == TEXT("draw") || Action == TEXT("discover_draw")))
+			|| (Trigger == TEXT("on_discard") && (Action == TEXT("discard_random") || Action == TEXT("discard_hand")))
+			|| (Trigger == TEXT("on_reshuffle") && Action == TEXT("shuffle_zone"))
+			|| (Trigger == TEXT("on_status_applied") && (Action == TEXT("apply_status")
+				|| Action == TEXT("set_status") || Action == TEXT("apply_temp_strength")));
+		if (bCanImmediatelyRetriggerItself && MaxTriggers == 0)
+		{
+			OutError = FString::Printf(TEXT("%s 上执行 %s 可能再次触发自身；请添加 limit 1..99"),
+				*Trigger, *Action);
+			return false;
+		}
 		const int32 Cap = AuthoredEffectCap(Action, Tier, bRelic);
 		const int32 Value = GetInt(Object, TEXT("value"), Cap == 0 ? 0 : 1);
 		if (Action == TEXT("transfer") && (Value < -10 || Value > 10))
@@ -1416,8 +1466,10 @@ namespace
 			OutCard.Effects.Add(Effect);
 		}
 		const TSharedPtr<FJsonObject>* Upgrade = nullptr;
+		bool bHasExplicitUpgrade = false;
 		if (Object->TryGetObjectField(TEXT("upgrade"), Upgrade))
 		{
+			bHasExplicitUpgrade = true;
 			OutCard.UpgradedCost = GetInt(*Upgrade, TEXT("cost"), -1);
 			OutCard.UpgradedCounterCondition = GetString(*Upgrade, TEXT("counter_condition"));
 			if (OutCard.UpgradedCost < -1 || OutCard.UpgradedCost > 3) { OutError = TEXT("upgrade.cost 必须为-1~3"); return false; }
@@ -1437,9 +1489,32 @@ namespace
 		if (OutCard.UpgradedEffects.Num() == 0)
 		{
 			OutCard.UpgradedEffects = OutCard.Effects;
-			FCardEffect& First = OutCard.UpgradedEffects[0];
-			if (!First.StatusId.IsEmpty()) First.StatusStacks += 1;
-			else if (First.Value > 0 && First.Action != TEXT("draw") && First.Action != TEXT("gain_spirit")) First.Value += 2;
+			if (!bHasExplicitUpgrade)
+			{
+				bool bStrengthened = false;
+				for (FCardEffect& Effect : OutCard.UpgradedEffects)
+				{
+					const bool bStackAction = Effect.Action == TEXT("apply_status")
+						|| Effect.Action == TEXT("remove_status") || Effect.Action == TEXT("set_status")
+						|| Effect.Action == TEXT("apply_temp_strength");
+					if (bStackAction && Effect.StatusStacks > 0)
+					{
+						Effect.StatusStacks += 1;
+						bStrengthened = true;
+						break;
+					}
+					if (Effect.Value > 0)
+					{
+						const bool bPrimaryNumber = Effect.Action.Contains(TEXT("damage"))
+							|| Effect.Action == TEXT("block") || Effect.Action == TEXT("heal")
+							|| Effect.Action == TEXT("self_damage");
+						Effect.Value += bPrimaryNumber ? 2 : 1;
+						bStrengthened = true;
+						break;
+					}
+				}
+				if (!bStrengthened && OutCard.Cost > 0) OutCard.UpgradedCost = OutCard.Cost - 1;
+			}
 		}
 		TArray<FString> Descriptions;
 		for (const FCardEffect& Effect : OutCard.Effects) Descriptions.Add(SafeEffectDescription(Effect));
@@ -1452,8 +1527,14 @@ namespace
 		const TSharedPtr<FJsonObject>* Visual = nullptr;
 		if (Object->TryGetObjectField(TEXT("visual"), Visual))
 		{
-			static const TArray<FString> Animations = {TEXT("none"), TEXT("slash"), TEXT("fireball"), TEXT("impact"), TEXT("block"), TEXT("heal"), TEXT("draw")};
-			static const TArray<FString> Sounds = {TEXT("none"), TEXT("sword_slash"), TEXT("fireball"), TEXT("block"), TEXT("heal"), TEXT("draw")};
+			static const TArray<FString> Animations = {TEXT("none"), TEXT("slash"), TEXT("greatsword"), TEXT("myriad_swords"),
+				TEXT("sword_wave"), TEXT("thunder"), TEXT("flame_burst"), TEXT("poison"), TEXT("ward"),
+				TEXT("spirit_flow"), TEXT("power_aura"), TEXT("talisman"), TEXT("seal"), TEXT("curse_burst"),
+				TEXT("fireball"), TEXT("impact"), TEXT("block"), TEXT("heal"), TEXT("draw")};
+			static const TArray<FString> Sounds = {TEXT("none"), TEXT("sword_slash"), TEXT("sword_heavy"), TEXT("sword_flurry"),
+				TEXT("sword_wave"), TEXT("thunder_crack"), TEXT("fire_burst"), TEXT("poison_hiss"), TEXT("ward_raise"),
+				TEXT("spirit_chime"), TEXT("power_surge"), TEXT("talisman_cast"), TEXT("seal_stamp"), TEXT("curse_whisper"),
+				TEXT("impact_hit"), TEXT("heal_chime"), TEXT("fireball"), TEXT("block"), TEXT("heal"), TEXT("draw")};
 			const FString Animation = GetString(*Visual, TEXT("animation"), OutCard.Visual.Animation);
 			const FString Sound = GetString(*Visual, TEXT("sound"), OutCard.Visual.Sound);
 			if (!Animations.Contains(Animation) || !Sounds.Contains(Sound)) { OutError = TEXT("visual.animation/sound 非法"); return false; }
@@ -1481,6 +1562,174 @@ namespace
 		else if (Relic.Trigger == TEXT("on_reshuffle")) Trigger = TEXT("洗牌时");
 		return Trigger + TEXT("，") + SafeEffectDescription(Relic.Effect);
 	}
+
+	FString NormalizeOpeningWordingSafetyText(FString Text)
+	{
+		Text.TrimStartAndEndInline();
+		Text.ReplaceInline(TEXT("\r\n"), TEXT("\n"));
+		Text.ReplaceInline(TEXT("\r"), TEXT("\n"));
+		Text.ReplaceInline(TEXT("\n"), TEXT(" "));
+		Text.ReplaceInline(TEXT("\t"), TEXT(" "));
+		while (Text.Contains(TEXT("  "))) Text.ReplaceInline(TEXT("  "), TEXT(" "));
+		Text.ToLowerInline();
+		return Text;
+	}
+
+	bool ContainsOpeningWordingNeedle(const FString& NormalizedText, const FString& Needle,
+		int32 MinimumLength = 1)
+	{
+		const FString NormalizedNeedle = NormalizeOpeningWordingSafetyText(Needle);
+		return NormalizedNeedle.Len() >= MinimumLength
+			&& NormalizedText.Contains(NormalizedNeedle, ESearchCase::IgnoreCase);
+	}
+
+	bool IsSafeOpeningChoiceWording(const FString& Text, const FString& RelicId,
+		const FString& RelicName, const FString& RelicDescription, const FString& RelicRarity)
+	{
+		const FString NormalizedText = NormalizeOpeningWordingSafetyText(Text);
+		if (NormalizedText.IsEmpty()) return false;
+
+		// Exact identity/effect fragments are engine-owned facts. Rejecting the whole
+		// response sends the opening to its local, opening-specific fallback; it never
+		// starts a second wording request or changes the locked reward.
+		if (ContainsOpeningWordingNeedle(NormalizedText, RelicId, 3)
+			|| ContainsOpeningWordingNeedle(NormalizedText, RelicName, 2)
+			|| ContainsOpeningWordingNeedle(NormalizedText, RelicDescription, 8)
+			|| ContainsOpeningWordingNeedle(NormalizedText, RelicRarity, 2)) return false;
+
+		FString Description = RelicDescription;
+		Description.ReplaceInline(TEXT("，"), TEXT("\n"));
+		Description.ReplaceInline(TEXT("；"), TEXT("\n"));
+		Description.ReplaceInline(TEXT("。"), TEXT("\n"));
+		Description.ReplaceInline(TEXT("！"), TEXT("\n"));
+		Description.ReplaceInline(TEXT("？"), TEXT("\n"));
+		Description.ReplaceInline(TEXT(","), TEXT("\n"));
+		Description.ReplaceInline(TEXT(";"), TEXT("\n"));
+		Description.ReplaceInline(TEXT("."), TEXT("\n"));
+		TArray<FString> DescriptionFragments;
+		Description.ParseIntoArrayLines(DescriptionFragments, true);
+		for (const FString& Fragment : DescriptionFragments)
+			if (ContainsOpeningWordingNeedle(NormalizedText, Fragment, 8)) return false;
+
+		static const TCHAR* ForbiddenRarityMarkers[] = {
+			TEXT("凡品"), TEXT("中品"), TEXT("上品"), TEXT("仙品"),
+			TEXT("common"), TEXT("uncommon"), TEXT("rare"), TEXT("legendary"),
+			TEXT("普通"), TEXT("稀有"), TEXT("传说")
+		};
+		for (const TCHAR* Marker : ForbiddenRarityMarkers)
+			if (ContainsOpeningWordingNeedle(NormalizedText, Marker)) return false;
+
+		// These phrases reveal an acquisition or a concrete mechanic even when the
+		// model paraphrases the exact relic description.
+		static const TCHAR* ForbiddenMechanicMarkers[] = {
+			TEXT("获得"), TEXT("得到"), TEXT("拿到"), TEXT("收获"), TEXT("收下"),
+			TEXT("奖励"), TEXT("赠予"), TEXT("赋予"), TEXT("收入囊中"), TEXT("入手"),
+			TEXT("效果"), TEXT("触发"), TEXT("每回合"), TEXT("战斗开始时"),
+			TEXT("击杀时"), TEXT("造成伤害"), TEXT("格挡"), TEXT("抽牌"),
+			TEXT("恢复气血"), TEXT("获得护盾"), TEXT("伤害"), TEXT("护盾"),
+			TEXT("治疗"), TEXT("强化"), TEXT("减伤"), TEXT("弃牌"), TEXT("洗牌"),
+			TEXT("费用"), TEXT("攻击力"), TEXT("防御"), TEXT("品级"), TEXT("法器【"), TEXT("id=")
+		};
+		for (const TCHAR* Marker : ForbiddenMechanicMarkers)
+			if (ContainsOpeningWordingNeedle(NormalizedText, Marker)) return false;
+		return true;
+	}
+
+	bool ParseBoundOpeningWording(const FString& ResponseBody, const TArray<FString>& ExpectedRelicIds,
+		const TArray<FString>& ExpectedRelicNames, const TArray<FString>& ExpectedRelicDescriptions,
+		const TArray<FString>& ExpectedRelicRarities, TArray<FString>& OutTexts, FString& OutError)
+	{
+		OutTexts.Reset();
+		OutError.Reset();
+		if (ExpectedRelicIds.Num() != 3 || ExpectedRelicIds[0].IsEmpty()
+			|| ExpectedRelicIds[1].IsEmpty() || ExpectedRelicIds[2].IsEmpty()
+			|| ExpectedRelicIds[0] == ExpectedRelicIds[1] || ExpectedRelicIds[0] == ExpectedRelicIds[2]
+			|| ExpectedRelicIds[1] == ExpectedRelicIds[2])
+		{
+			OutError = TEXT("开场文案绑定法器集合无效");
+			return false;
+		}
+		const FString Content = ExtractTransportContent(ResponseBody).TrimStartAndEnd();
+		TSharedPtr<FJsonObject> Root;
+		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Content);
+		if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
+		{
+			OutError = TEXT("开场文案响应不是JSON对象");
+			return false;
+		}
+		if (Root->Values.Num() != 1 || !Root->HasField(TEXT("choices")))
+		{
+			OutError = TEXT("开场文案响应包含未授权字段");
+			return false;
+		}
+		const TArray<TSharedPtr<FJsonValue>>* Choices = nullptr;
+		if (!Root->TryGetArrayField(TEXT("choices"), Choices) || !Choices || Choices->Num() != 3)
+		{
+			OutError = TEXT("开场文案响应未包含恰好三个选择");
+			return false;
+		}
+		TMap<FString, FString> TextByRelicId;
+		TSet<FString> UniqueTexts;
+		for (const TSharedPtr<FJsonValue>& Value : *Choices)
+		{
+			const TSharedPtr<FJsonObject> Choice = Value.IsValid() ? Value->AsObject() : nullptr;
+			if (!Choice.IsValid()) { OutError = TEXT("开场文案选择项不是对象"); return false; }
+			if (Choice->Values.Num() != 2 || !Choice->HasField(TEXT("choice_id"))
+				|| !Choice->HasField(TEXT("text")))
+			{
+				OutError = TEXT("开场文案选择项包含未授权字段");
+				return false;
+			}
+			FString ChoiceId;
+			FString Text;
+			Choice->TryGetStringField(TEXT("choice_id"), ChoiceId);
+			Choice->TryGetStringField(TEXT("text"), Text);
+			ChoiceId.TrimStartAndEndInline();
+			Text.TrimStartAndEndInline();
+			if (!ExpectedRelicIds.Contains(ChoiceId) || Text.IsEmpty() || Text.Len() > 800
+				|| TextByRelicId.Contains(ChoiceId))
+			{
+				OutError = TEXT("开场文案选择项的法器ID不匹配或文案为空");
+				return false;
+			}
+			for (int32 Index = 0; Index < ExpectedRelicIds.Num(); ++Index)
+			{
+				const FString RelicName = ExpectedRelicNames.IsValidIndex(Index)
+					? ExpectedRelicNames[Index] : FString();
+				const FString RelicDescription = ExpectedRelicDescriptions.IsValidIndex(Index)
+					? ExpectedRelicDescriptions[Index] : FString();
+				const FString RelicRarity = ExpectedRelicRarities.IsValidIndex(Index)
+					? ExpectedRelicRarities[Index] : FString();
+				if (!IsSafeOpeningChoiceWording(Text, ExpectedRelicIds[Index], RelicName,
+					RelicDescription, RelicRarity))
+				{
+					OutError = TEXT("开场文案泄露了法器身份、品级、效果或获得信息");
+					return false;
+				}
+			}
+			if (UniqueTexts.Contains(Text))
+			{
+				OutError = TEXT("开场文案三个选择不能完全重复");
+				return false;
+			}
+			UniqueTexts.Add(Text);
+			TextByRelicId.Add(ChoiceId, Text);
+		}
+		for (const FString& RelicId : ExpectedRelicIds)
+		{
+			const FString* Found = TextByRelicId.Find(RelicId);
+			if (!Found) { OutError = TEXT("开场文案缺少已锁定法器的选择"); OutTexts.Reset(); return false; }
+			OutTexts.Add(*Found);
+		}
+		return OutTexts.Num() == 3;
+	}
+}
+
+bool UInfiniteNarrativeService::IsOpeningChoiceWordingSafe(const FString& Text,
+	const FString& RelicId, const FString& RelicName, const FString& RelicDescription,
+	const FString& RelicRarity)
+{
+	return IsSafeOpeningChoiceWording(Text, RelicId, RelicName, RelicDescription, RelicRarity);
 }
 
 void UInfiniteNarrativeService::Generate(const FInfiniteNarrativeSettings& Settings,
@@ -1502,6 +1751,7 @@ void UInfiniteNarrativeService::Generate(const FInfiniteNarrativeSettings& Setti
 	EffectiveMaxOutputTokens = FMath::Clamp(Settings.MaxOutputTokens, 1024, 262144);
 	WriterFormatRetryAttempt = 0;
 	LastWriterFormatError.Reset();
+	bReasoningContentFallbackAttempted = false;
 	MvuTokenCapAttempt = 0;
 	MvuSemanticRetryAttempt = 0;
 	TotalModelRequestCount = 0;
@@ -1544,6 +1794,220 @@ void UInfiniteNarrativeService::Generate(const FInfiniteNarrativeSettings& Setti
 	// allowlisted engine delta directly, so old MVU settings remain load-compatible but
 	// are intentionally absent from the runtime request chain.
 	IssueRequest();
+}
+
+FString UInfiniteNarrativeService::BuildStoryDirectionCacheKey(
+	const FInfiniteNarrativeSettings& Settings)
+{
+	FString EffectiveDirection = Settings.bStoryDirectionEnabled
+		? Settings.StoryDirection.TrimStartAndEnd() : FString();
+	EffectiveDirection.ReplaceInline(TEXT("\r\n"), TEXT("\n"));
+	EffectiveDirection.ReplaceInline(TEXT("\r"), TEXT("\n"));
+	EffectiveDirection.TrimStartAndEndInline();
+	FString Canonical = EffectiveDirection.IsEmpty() ? TEXT("disabled\n") : TEXT("enabled\n");
+	Canonical += EffectiveDirection;
+	return FString::Printf(TEXT("story_direction:%s:%08x"),
+		EffectiveDirection.IsEmpty() ? TEXT("off") : TEXT("on"), FCrc::StrCrc32(*Canonical));
+}
+
+void UInfiniteNarrativeService::GenerateOpeningChoiceWording(
+	const FInfiniteNarrativeSettings& Settings,
+	const FInfiniteNarrativeRequestContext& Context,
+	FOnInfiniteOpeningWordingReady Completion)
+{
+	// This is deliberately a separate request phase. The opening's local beat owns
+	// every consequence; this call is allowed to return copy for the three already
+	// bound slots only. Cancelling/restarting it must not consume or reroll a relic.
+	CancelGeneration();
+	PendingOpeningWordingCompletion = MoveTemp(Completion);
+	PendingContext = Context;
+	PendingSettings = Settings;
+	TotalModelRequestCount = 0;
+	bReasoningContentFallbackAttempted = false;
+	RequestPhase = ERequestPhase::OpeningWording;
+	if (!PendingContext.bOpeningChoiceWording || PendingContext.OpeningChoiceRelicIds.Num() != 3
+		|| PendingContext.OpeningChoicePrompt.TrimStartAndEnd().IsEmpty())
+	{
+		CompleteOpeningWording(false, TArray<FString>(), TEXT("开场文案请求上下文不完整；已使用本地衔接文案"));
+		return;
+	}
+	if (Settings.Endpoint.TrimStartAndEnd().IsEmpty() || Settings.Model.TrimStartAndEnd().IsEmpty())
+	{
+		CompleteOpeningWording(false, TArray<FString>(), TEXT("未配置 LLM 接口或模型名称；已使用本地衔接文案"));
+		return;
+	}
+	const float TransportTimeout = FMath::Max(180.f, Settings.TimeoutSeconds + 5.f);
+	if (GConfig)
+	{
+		GConfig->SetFloat(TEXT("HTTP"), TEXT("HttpConnectionTimeout"), TransportTimeout, GEngineIni);
+		GConfig->SetFloat(TEXT("HTTP"), TEXT("HttpActivityTimeout"), TransportTimeout, GEngineIni);
+		FHttpModule::Get().UpdateConfigs();
+	}
+	FString PresetError;
+	if (!FNarrativePromptManager::LoadPreset(TEXT("Data/rp_prompt_preset.json"),
+		Settings.NarrativePromptPresetPath, Settings.NarrativePromptPresetOverride,
+		NarrativePreset, PresetError))
+	{
+		CompleteOpeningWording(false, TArray<FString>(), TEXT("开场文案预设加载失败；已使用本地衔接文案"));
+		return;
+	}
+	IssueOpeningWordingRequest();
+}
+
+void UInfiniteNarrativeService::IssueOpeningWordingRequest()
+{
+	if (!ReserveModelRequest(TEXT("opening_wording"))) return;
+	const FInfiniteNarrativeSettings& Settings = PendingSettings;
+	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+	Root->SetStringField(TEXT("model"), Settings.Model);
+	ApplyGenerationControls(Root, NarrativePreset, false);
+	Root->SetNumberField(TEXT("max_tokens"), FMath::Clamp(Settings.MaxOutputTokens, 512, 4096));
+	TSharedPtr<FJsonObject> ResponseFormat = MakeShared<FJsonObject>();
+	ResponseFormat->SetStringField(TEXT("type"), TEXT("json_object"));
+	Root->SetObjectField(TEXT("response_format"), ResponseFormat);
+	Root->SetBoolField(TEXT("stream"), false);
+
+	TArray<TSharedPtr<FJsonValue>> Messages;
+	TSharedPtr<FJsonObject> SystemMessage = MakeShared<FJsonObject>();
+	SystemMessage->SetStringField(TEXT("role"), TEXT("system"));
+		SystemMessage->SetStringField(TEXT("content"), TEXT(
+			"你只负责为一个已经固定的游戏开场补写三个选择按钮的可见文案。"
+			"必须只返回JSON对象 {\"choices\":[{\"choice_id\":\"预给定法器ID\",\"text\":\"文案\"},...]}。"
+			"choice_id只能逐字使用用户消息给出的三个法器ID，每个恰好一次，不得交换、增删或猜测ID。"
+			"不得返回scene、result_summary、next、reward、relic、enemy、state_patch或任何规则字段；"
+			"不得改变法器名称、说明、奖励、敌人、人数、冲突、固定开场正文或剧情结果。"
+			"文案绝不能泄露已绑定法器的精确名称、ID、品级、效果、数值、触发条件，或暗示玩家将获得哪件物品；"
+			"文案只写玩家此刻如何处理眼前处境、选择的行动如何贴合现场并自然引向已经确定的冲突；"
+			"三个选择必须使用不同的动作、观察角度或物件位置，不能三句相同；"
+			"不提前写战斗胜负，不新增故事分支，不替换法器。"));
+	Messages.Add(MakeShared<FJsonValueObject>(SystemMessage));
+	TSharedPtr<FJsonObject> UserMessage = MakeShared<FJsonObject>();
+	UserMessage->SetStringField(TEXT("role"), TEXT("user"));
+	UserMessage->SetStringField(TEXT("content"), PendingContext.OpeningChoicePrompt);
+	Messages.Add(MakeShared<FJsonValueObject>(UserMessage));
+	const FString EffectiveReasoningPrefill = ResolveEffectiveReasoningPrefill(Settings);
+	if (!EffectiveReasoningPrefill.IsEmpty())
+	{
+		TSharedPtr<FJsonObject> Prefill = MakeShared<FJsonObject>();
+		Prefill->SetStringField(TEXT("role"), TEXT("assistant"));
+		Prefill->SetStringField(TEXT("reasoning_content"), EffectiveReasoningPrefill);
+		Messages.Add(MakeShared<FJsonValueObject>(Prefill));
+	}
+	Root->SetArrayField(TEXT("messages"), Messages);
+
+	FString Payload;
+	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Payload);
+	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+	ActiveRequest = FHttpModule::Get().CreateRequest();
+	ActiveRequest->SetURL(ResolveChatCompletionsUrl(Settings.Endpoint));
+	ActiveRequest->SetVerb(TEXT("POST"));
+	ActiveRequest->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
+	ActiveRequest->SetHeader(TEXT("User-Agent"), TEXT("AscendSpire/1.0"));
+	if (!Settings.ApiKey.IsEmpty())
+		ActiveRequest->SetHeader(TEXT("Authorization"), FString::Printf(TEXT("Bearer %s"), *Settings.ApiKey));
+	ActiveRequest->SetTimeout(FMath::Clamp(Settings.TimeoutSeconds, 5.f, 180.f));
+	ActiveRequest->SetContentAsString(Payload);
+	UE_LOG(LogTemp, Log, TEXT("[InfiniteRP] opening wording request model=%s payload_chars=%d choices=3"),
+		*Settings.Model, Payload.Len());
+	ActiveRequest->OnProcessRequestComplete().BindUObject(this,
+		&UInfiniteNarrativeService::HandleOpeningWordingComplete);
+	if (!ActiveRequest->ProcessRequest())
+		CompleteOpeningWording(false, TArray<FString>(), TEXT("开场文案请求未能启动；已使用本地衔接文案"));
+}
+
+FString UInfiniteNarrativeService::ResolveEffectiveReasoningPrefill(
+	const FInfiniteNarrativeSettings& Settings) const
+{
+	if (!Settings.bEnableReasoningPrefill) return FString();
+	if (!Settings.ReasoningPrefill.TrimStartAndEnd().IsEmpty()) return Settings.ReasoningPrefill;
+	if (Settings.HiddenReasoningPrefillPath.TrimStartAndEnd().IsEmpty()
+		|| Settings.HiddenReasoningPrefillFieldPath.TrimStartAndEnd().IsEmpty()) return FString();
+	FString HiddenPayload;
+	int32 HiddenBytes = 0;
+	if (!FPrivateReasoningPrefillLoader::LoadJsonField(Settings.HiddenReasoningPrefillPath,
+		Settings.HiddenReasoningPrefillFieldPath, HiddenPayload, HiddenBytes)) return FString();
+	return HiddenPayload;
+}
+
+bool UInfiniteNarrativeService::ParseOpeningWordingResponse(const FString& ResponseBody,
+	TArray<FString>& OutTexts, FString& OutError) const
+{
+	return ParseBoundOpeningWording(ResponseBody, PendingContext.OpeningChoiceRelicIds,
+		PendingContext.OpeningChoiceRelicNames, PendingContext.OpeningChoiceRelicDescriptions,
+		PendingContext.OpeningChoiceRelicRarities, OutTexts, OutError);
+}
+
+bool UInfiniteNarrativeService::ParseOpeningWordingForAutomationTest(const FString& ResponseBody,
+	const TArray<FString>& ExpectedRelicIds, TArray<FString>& OutTexts, FString& OutError) const
+{
+	return ParseBoundOpeningWording(ResponseBody, ExpectedRelicIds, TArray<FString>(), TArray<FString>(),
+		TArray<FString>(), OutTexts, OutError);
+}
+
+bool UInfiniteNarrativeService::ParseOpeningWordingForAutomationTest(const FString& ResponseBody,
+	const TArray<FString>& ExpectedRelicIds, const TArray<FString>& ExpectedRelicNames,
+	const TArray<FString>& ExpectedRelicDescriptions, const TArray<FString>& ExpectedRelicRarities,
+	TArray<FString>& OutTexts, FString& OutError) const
+{
+	return ParseBoundOpeningWording(ResponseBody, ExpectedRelicIds, ExpectedRelicNames,
+		ExpectedRelicDescriptions, ExpectedRelicRarities, OutTexts, OutError);
+}
+
+void UInfiniteNarrativeService::HandleOpeningWordingComplete(FHttpRequestPtr Request,
+	FHttpResponsePtr Response, bool bSucceeded)
+{
+	if (!ActiveRequest.IsValid() || Request != ActiveRequest)
+	{
+		UE_LOG(LogTemp, Display, TEXT("[InfiniteRP] ignored stale/cancelled opening wording completion"));
+		return;
+	}
+	ActiveRequest.Reset();
+	if (!bSucceeded || !Response.IsValid())
+	{
+		CompleteOpeningWording(false, TArray<FString>(), TEXT("开场文案连接失败或超时；已使用本地衔接文案"));
+		return;
+	}
+	if (Response->GetResponseCode() < 200 || Response->GetResponseCode() >= 300)
+	{
+		const FString ErrorBody = Response->GetContentAsString();
+		const bool bReasoningFieldRejected = (Response->GetResponseCode() == 400
+			|| Response->GetResponseCode() == 422)
+			&& (ErrorBody.Contains(TEXT("reasoning_content"), ESearchCase::IgnoreCase)
+				|| ErrorBody.Contains(TEXT("reasoning content"), ESearchCase::IgnoreCase))
+			&& (ErrorBody.Contains(TEXT("unknown"), ESearchCase::IgnoreCase)
+				|| ErrorBody.Contains(TEXT("unsupported"), ESearchCase::IgnoreCase)
+				|| ErrorBody.Contains(TEXT("invalid"), ESearchCase::IgnoreCase)
+				|| ErrorBody.Contains(TEXT("not allowed"), ESearchCase::IgnoreCase));
+		if (bReasoningFieldRejected && !bReasoningContentFallbackAttempted)
+		{
+			bReasoningContentFallbackAttempted = true;
+			PendingSettings.bEnableReasoningPrefill = false;
+			UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] opening provider rejected reasoning_content; retrying once without opening prefill"));
+			IssueOpeningWordingRequest();
+			return;
+		}
+		CompleteOpeningWording(false, TArray<FString>(), FString::Printf(
+			TEXT("开场文案返回HTTP %d；已使用本地衔接文案"), Response->GetResponseCode()));
+		return;
+	}
+	TArray<FString> Texts;
+	FString ParseError;
+	if (!ParseOpeningWordingResponse(Response->GetContentAsString(), Texts, ParseError))
+	{
+		CompleteOpeningWording(false, TArray<FString>(), TEXT("开场文案格式异常；已使用本地衔接文案"));
+		return;
+	}
+	CompleteOpeningWording(true, Texts, TEXT("开场固定正文保留；本轮只接受按法器ID绑定的选择文案"));
+}
+
+void UInfiniteNarrativeService::CompleteOpeningWording(bool bSuccess,
+	const TArray<FString>& Texts, const FString& Diagnostic)
+{
+	ActiveRequest.Reset();
+	RequestPhase = ERequestPhase::Generation;
+	if (!PendingOpeningWordingCompletion.IsBound()) return;
+	FOnInfiniteOpeningWordingReady Completion = MoveTemp(PendingOpeningWordingCompletion);
+	Completion.Execute(bSuccess, Texts, Diagnostic);
 }
 
 void UInfiniteNarrativeService::PrepareChoiceRoutePlan()
@@ -1819,6 +2283,7 @@ void UInfiniteNarrativeService::CancelGeneration()
 {
 	++GenerationSerial;
 	PendingCompletion.Unbind();
+	PendingOpeningWordingCompletion.Unbind();
 	PendingStreamUpdate.Unbind();
 	PendingCardForgeCompletion.Unbind();
 	if (ActiveRequest.IsValid())
@@ -1832,7 +2297,17 @@ void UInfiniteNarrativeService::CancelGeneration()
 	bHasPendingDraftBeat = false;
 	PendingDraftBeat = FInfiniteNarrativeBeat();
 	PendingDraftJson.Reset();
+	CardForgeMessages.Reset();
+	CardForgeLastToolFeedback.Reset();
+	CardForgeIntendedText.Reset();
+	CardForgePendingCandidate = FCardData();
+	bCardForgeAwaitingReview = false;
+	CardForgeWorkflowStartedAt = 0.0;
+	CardForgeRequestStartedAt = 0.0;
 	RequestPhase = ERequestPhase::Generation;
+	PendingContext.bOpeningChoiceWording = false;
+	PendingContext.OpeningChoicePrompt.Reset();
+	PendingContext.OpeningChoiceRelicIds.Reset();
 	ResetWriterStreamState();
 }
 
@@ -1846,58 +2321,558 @@ void UInfiniteNarrativeService::ForgeCard(const FInfiniteNarrativeSettings& Sett
 	PendingCardForgeJob = Job;
 	PendingCardForgeCompletion = MoveTemp(Completion);
 	CardForgeAttempt = 0;
+	CardForgeWorkflowStartedAt = FPlatformTime::Seconds();
+	CardForgeRequestStartedAt = 0.0;
+	CardForgeLastToolFeedback.Reset();
+	CardForgeIntendedText.Reset();
+	CardForgePendingCandidate = FCardData();
+	bCardForgeAwaitingReview = false;
 	LastCardForgeError.Reset();
 	RequestPhase = ERequestPhase::CardForge;
+
+	const FString SystemPrompt = TEXT(
+		"你是《登仙牌》的卡牌设计与实现 agent。把剧情中玩家刚取得的事物实现为一张真正可运行、主题鲜明、对当前构筑有意义的原创卡。"
+		"concept 是剧情素材，不是指定卡名；若构筑中已有同名或近似牌，应另做名称与机制都独立的新设计。"
+		"先在内部依序完成：理解最近剧情与目标事物；决定玩家应从玩法中感受到什么故事；写出简短明确的预期卡面效果；再思考如何用 CardScript 实现。"
+		"不要输出分析过程。自由创造机制，不要沿用固定模板；也不要因为没有同名现成动作就立刻退化成普通伤害、格挡或抽牌。"
+		"优先用事件、条件、牌区、变量和资源转化组合出你的想法。\n"
+		"这是游戏内的快速环节。首轮消息已经包含完整任务、当前构筑和所需规则，不必先请求上下文。"
+		"每轮只能输出一个 JSON 对象，不要输出思考、解释或 Markdown。首次与修改候选时：\n"
+		"{\"action\":\"try_card\",\"intended_text\":\"简短明确的预期卡面效果\",\"script\":\"完整 CardScript\"}\n"
+		"intended_text 是精确的故事设计契约，不是宽泛主题：脚本必须逐项实现它，不得擅自增加其中没有的状态、代价或收益。"
+		"try_card 会在本地编译、构建并做轻量战斗 smoke test；机械通过后仍不会提交，而会返回引擎实际生成的基础与升级卡面。"
+		"你必须把真实卡面逐项对照 intended_text，并估算低值、当前构筑中的常见值和合理上限。完全忠实时才返回：\n"
+		"{\"action\":\"accept_card\",\"implementation_check\":\"真实卡面如何逐项对应预期且没有无关效果\","
+		"\"power_check\":\"低值：...；常见值：...；上限值：...\"}\n"
+		"若真实卡面偏离预期或强度不合适，保持 intended_text，修改 CardScript 后再次 try_card。"
+		"收到 ERROR 或复核发现真实卡面偏离时才修改并重试。默认保持 intended_text，只修改 CardScript 实现；遇到不支持的写法，先根据错误寻找其他原语组合，"
+		"确认当前语言确实无法表达时才最小幅度修改 intended_text 与设计。"
+		"强度保守可以接受；平衡时优先调整数值、比例、费用、条件、retain/exhaust，不得用无关效果或多种无关代价污染核心设计。"
+		"最终只提交一张牌，不生成法宝、敌人或剧情。\n"
+		"提交前在本轮内部自行检查：牌应围绕一个核心玩法，用必要且相互关联的效果表达；不要把效果数量当成设计目标；"
+		"卡面说明必须短、清楚、可扫读；不要重复同一效果；"
+		"引用的状态或战斗变量必须由本牌或当前构筑可靠地产生；升级必须带来与核心玩法有关的实际变化。\n"
+		"[游戏规则与设计标准]\n")
+		+ LoadCardForgeWorldBook() + TEXT("\n[可执行 CardScript 手册]\n")
+		+ FCardScriptCompiler::PromptReference();
+	AppendCardForgeMessage(TEXT("system"), SystemPrompt);
+	const FString UserPrompt = FString::Printf(TEXT(
+		"[已确认的选中分支生卡任务]\nsource_fact=%s\nconcept=%s\nmechanic_intent=%s\nacquisition=%s\n"
+		"请直接自主设计并调用 try_card。\n\n%s"),
+		*PendingCardForgeJob.SourceFact, *PendingCardForgeJob.Concept,
+		*PendingCardForgeJob.MechanicIntent, *PendingCardForgeJob.Acquisition,
+		*BuildCardForgeContext());
+	AppendCardForgeMessage(TEXT("user"), UserPrompt);
 	IssueCardForgeRequest();
+}
+
+void UInfiniteNarrativeService::AppendCardForgeMessage(const FString& Role, const FString& Content)
+{
+	FNarrativePromptMessage Message;
+	Message.Role = Role;
+	Message.Content = Content.Left(CardForgeMaxMessageChars);
+	CardForgeMessages.Add(MoveTemp(Message));
+}
+
+FString UInfiniteNarrativeService::LoadCardForgeWorldBook() const
+{
+	FString Content;
+	const FString Path = FPaths::ProjectContentDir() / TEXT("Data/rp_card_forge_worldbook.json");
+	if (FFileHelper::LoadFileToString(Content, *Path))
+	{
+		Content.TrimStartAndEndInline();
+		return Content.Left(CardForgeMaxMessageChars);
+	}
+	return TEXT("{\"error\":\"卡牌锻造世界书缺失\",\"instruction\":\"只使用CardScript工具手册中明确支持的字段、动作、条件和数值上限。\"}");
+}
+
+FString UInfiniteNarrativeService::BuildCardForgeContext() const
+{
+	auto Clip = [](const FString& Source, int32 MaxChars)
+	{
+		FString Result = Source;
+		Result.TrimStartAndEndInline();
+		if (Result.Len() > MaxChars)
+			Result = Result.Left(FMath::Max(0, MaxChars - 6)) + TEXT("……");
+		return Result;
+	};
+	const FString Build = Clip(PendingContext.CardForgeBuildSummary.IsEmpty()
+		? FString::Join(PendingContext.AbilityNames, TEXT("、")) : PendingContext.CardForgeBuildSummary, 7200);
+	const FString WorldState = Clip(PendingContext.WorldStateJson.IsEmpty()
+		? TEXT("{}") : PendingContext.WorldStateJson, 1800);
+	const FString Variables = Clip(PendingContext.EngineVariableContext.IsEmpty()
+		? TEXT("尚无") : PendingContext.EngineVariableContext, 1600);
+	FString Recent = Clip(PendingContext.RecentRawContext, 2000);
+	if (Recent.IsEmpty() && PendingContext.RecentHistory.Num() > 0)
+	{
+		const int32 Start = FMath::Max(0, PendingContext.RecentHistory.Num() - 3);
+		for (int32 Index = Start; Index < PendingContext.RecentHistory.Num(); ++Index)
+		{
+			if (!Recent.IsEmpty()) Recent += TEXT("\n");
+			Recent += Clip(PendingContext.RecentHistory[Index], 700);
+		}
+		Recent = Clip(Recent, 2000);
+	}
+	const FString CombatSetup = Clip(PendingContext.CombatSetup, 900);
+	const FString CombatFact = Clip(PendingContext.CombatResolutionFact, 900);
+	const FString CombatDigest = Clip(PendingContext.CombatDigest, 1100);
+	return FString::Printf(TEXT(
+		"[当前游戏状态]\n轮次=%d；HP=%d/%d；灵石=%d；卡组张数=%d；可升级卡=%d\n"
+		"[玩家真实构筑；卡牌描述、数量和升级状态均可用于判断协同与短板]\n%s\n"
+		"[开放世界与权威变量摘要]\n%s\n%s\n"
+		"[最近剧情摘要]\n%s\n[战斗情境]\nsetup=%s\nresolution=%s\ndigest=%s\n"
+		"根据构筑决定新牌应补足短板、形成协同或开辟新玩法，但不要机械复制已有卡。"),
+		PendingContext.Cycle, PendingContext.HP, PendingContext.MaxHP, PendingContext.Gold,
+		PendingContext.DeckSize, PendingContext.UpgradeableCardCount,
+		Build.IsEmpty() ? TEXT("（尚无可读取构筑）") : *Build,
+		*WorldState, *Variables, Recent.IsEmpty() ? TEXT("（无）") : *Recent,
+		CombatSetup.IsEmpty() ? TEXT("（无）") : *CombatSetup,
+		CombatFact.IsEmpty() ? TEXT("（无）") : *CombatFact,
+		CombatDigest.IsEmpty() ? TEXT("（无）") : *CombatDigest);
+}
+
+bool UInfiniteNarrativeService::TestCardForgeCandidate(const FString& Script,
+	FCardData& OutCard, FString& OutFeedback) const
+{
+	OutCard = FCardData();
+	OutFeedback.Reset();
+	FString Candidate = Script;
+	Candidate.TrimStartAndEndInline();
+	if (Candidate.IsEmpty())
+	{
+		OutFeedback = TEXT("ERROR：script 为空，请提交完整卡牌脚本");
+		return false;
+	}
+	if (Candidate.Len() > 12000)
+	{
+		OutFeedback = TEXT("ERROR：script 超过 12000 字符；请删掉分析、解释和重复字段，只保留短脚本");
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> ScriptCard;
+	FString CompileError;
+	if (!FCardScriptCompiler::CompileToAuthoredObject(Candidate, ScriptCard, CompileError))
+	{
+		OutFeedback = TEXT("ERROR：短脚本无法编译：") + CompileError.Left(CardForgeMaxFeedbackChars - 420)
+			+ TEXT("\n保留原设计目标，优先尝试组合现有 trigger、if、scale、牌区操作、transfer 和战斗变量；"
+				"不要仅因缺少同名动作就改成普通伤害或格挡。若这些原语确实无法表达，再更换机制实现。");
+		return false;
+	}
+	FString BuildError;
+	if (!BuildAuthoredCard(ScriptCard, PendingContext.Cycle, 0, OutCard, BuildError))
+	{
+		OutFeedback = TEXT("ERROR：本地卡牌校验失败：") + BuildError.Left(CardForgeMaxFeedbackChars - 360)
+			+ TEXT("\n只修复这个硬错误；可重新组合事件、条件、变量或牌区动作，不必放弃卡牌的核心创意。");
+		return false;
+	}
+	if (OutCard.Effects.Num() == 0)
+	{
+		OutFeedback = TEXT("ERROR：卡牌没有可执行效果，请至少保留一行 play 效果");
+		OutCard = FCardData();
+		return false;
+	}
+
+	auto EffectsAreIdentical = [](const FCardEffect& A, const FCardEffect& B)
+	{
+		return A.Trigger == B.Trigger && A.Duration == B.Duration
+			&& A.Source == B.Source && A.Destination == B.Destination
+			&& A.bConsumeSource == B.bConsumeSource && A.WriteMode == B.WriteMode
+			&& A.MaxTriggers == B.MaxTriggers && A.Action == B.Action
+			&& A.Value == B.Value && A.Target == B.Target && A.Times == B.Times
+			&& A.StatusId == B.StatusId && A.StatusStacks == B.StatusStacks
+			&& A.Param == B.Param && A.Condition == B.Condition && A.ScaleBy == B.ScaleBy
+			&& A.ScaleFactor == B.ScaleFactor && A.ScaleDivisor == B.ScaleDivisor
+			&& FMath::IsNearlyEqual(A.Chance, B.Chance);
+	};
+	auto FindDuplicateEffects = [&EffectsAreIdentical](const TArray<FCardEffect>& Effects)
+	{
+		TArray<FString> Pairs;
+		for (int32 Left = 0; Left < Effects.Num(); ++Left)
+		{
+			for (int32 Right = Left + 1; Right < Effects.Num(); ++Right)
+			{
+				if (EffectsAreIdentical(Effects[Left], Effects[Right]))
+					Pairs.Add(FString::Printf(TEXT("%d/%d"), Left + 1, Right + 1));
+			}
+		}
+		return Pairs;
+	};
+	auto UsesCardCounter = [](const FCardEffect& Effect)
+	{
+		return Effect.ScaleBy == TEXT("counter")
+			|| Effect.Condition.Contains(TEXT("counter_at_least:"))
+			|| Effect.Condition.Contains(TEXT("source_at_least:counter="))
+			|| Effect.Condition.Contains(TEXT("source_at_most:counter="))
+			|| Effect.Condition.Contains(TEXT("source_equals:counter="));
+	};
+	auto CollectVariableNames = [](const FString& Text, TSet<FString>& OutNames)
+	{
+		int32 Cursor = 0;
+		while (Cursor < Text.Len())
+		{
+			const int32 Marker = Text.Find(TEXT("var:"), ESearchCase::CaseSensitive,
+				ESearchDir::FromStart, Cursor);
+			if (Marker == INDEX_NONE) break;
+			const int32 Start = Marker + 4;
+			int32 End = Start;
+			while (End < Text.Len())
+			{
+				const TCHAR Character = Text[End];
+				if (!FChar::IsAlnum(Character) && Character != TEXT('_') && Character != TEXT('-')) break;
+				++End;
+			}
+			const FString Name = Text.Mid(Start, End - Start);
+			// var:void is the documented zero-value source for writing a literal amount.
+			if (!Name.IsEmpty() && Name != TEXT("void")) OutNames.Add(Name);
+			Cursor = FMath::Max(End, Start + 1);
+		}
+	};
+	auto FindUnwrittenVariables = [&CollectVariableNames](const TArray<FCardEffect>& Effects)
+	{
+		TSet<FString> ReadNames;
+		TSet<FString> WrittenNames;
+		for (const FCardEffect& Effect : Effects)
+		{
+			CollectVariableNames(Effect.Source, ReadNames);
+			CollectVariableNames(Effect.ScaleBy, ReadNames);
+			CollectVariableNames(Effect.Condition, ReadNames);
+			if (Effect.Destination.StartsWith(TEXT("var:")))
+			{
+				const FString Name = Effect.Destination.Mid(4);
+				if (!Name.IsEmpty() && Name != TEXT("void")) WrittenNames.Add(Name);
+			}
+		}
+		for (const FString& WrittenName : WrittenNames) ReadNames.Remove(WrittenName);
+		TArray<FString> Result = ReadNames.Array();
+		Result.Sort();
+		return Result;
+	};
+
+	TArray<FString> HardIssues;
+	const int32 MaxVisibleEffects = FMath::Max(OutCard.Effects.Num(), OutCard.UpgradedEffects.Num());
+	const int32 MaxDescriptionChars = FMath::Max(OutCard.Description.Len(), OutCard.UpgradedDescription.Len());
+	if (MaxVisibleEffects > 4 || MaxDescriptionChars > 80)
+	{
+		HardIssues.Add(FString::Printf(TEXT(
+			"卡面过密（最多 %d 个效果、%d 字）；可读上限是 4 个效果且约 80 字。"
+			"删去枝节，把同一机制压缩进 condition/scale/times，不要缩写必要含义"),
+			MaxVisibleEffects, MaxDescriptionChars));
+	}
+	bool bUpgradeEffectsChanged = OutCard.Effects.Num() != OutCard.UpgradedEffects.Num();
+	if (!bUpgradeEffectsChanged)
+	{
+		for (int32 Index = 0; Index < OutCard.Effects.Num(); ++Index)
+		{
+			if (!EffectsAreIdentical(OutCard.Effects[Index], OutCard.UpgradedEffects[Index]))
+			{
+				bUpgradeEffectsChanged = true;
+				break;
+			}
+		}
+	}
+	const bool bUpgradeCostChanged = OutCard.UpgradedCost >= 0 && OutCard.UpgradedCost != OutCard.Cost;
+	const FString EffectiveUpgradeCounter = OutCard.UpgradedCounterCondition.IsEmpty()
+		? OutCard.CounterCondition : OutCard.UpgradedCounterCondition;
+	const bool bUpgradeCounterChanged = EffectiveUpgradeCounter != OutCard.CounterCondition;
+	if (!bUpgradeEffectsChanged && !bUpgradeCostChanged && !bUpgradeCounterChanged)
+	{
+		HardIssues.Add(TEXT(
+			"升级版与基础版完全相同；用 upgrade_cost、upgrade_counter 或完整的 upgrade_play/upgrade_触发行"
+			"强化核心玩法，不能只复制原效果"));
+	}
+	const TArray<FString> BaseDuplicatePairs = FindDuplicateEffects(OutCard.Effects);
+	if (BaseDuplicatePairs.Num() > 0)
+	{
+		HardIssues.Add(FString::Printf(TEXT(
+			"基础效果 %s 完全重复；合并为一行并用 value/times 表达次数，或改成真正不同的效果"),
+			*FString::Join(BaseDuplicatePairs, TEXT("、"))));
+	}
+	else
+	{
+		const TArray<FString> UpgradeDuplicatePairs = FindDuplicateEffects(OutCard.UpgradedEffects);
+		if (UpgradeDuplicatePairs.Num() > 0)
+		{
+			HardIssues.Add(FString::Printf(TEXT(
+				"升级效果 %s 完全重复；合并或改成真正不同的强化"),
+				*FString::Join(UpgradeDuplicatePairs, TEXT("、"))));
+		}
+	}
+	const bool bBaseUsesCounter = OutCard.Effects.ContainsByPredicate(UsesCardCounter);
+	if (bBaseUsesCounter && OutCard.CounterCondition.IsEmpty())
+	{
+		HardIssues.Add(TEXT(
+			"基础效果读取 counter/counter_at_least，但没有声明 counter；该计数永远不会增长。"
+			"请声明受支持的 counter 事件，或移除计数门槛并换成有真实来源的条件"));
+	}
+	else
+	{
+		const bool bUpgradeUsesCounter = OutCard.UpgradedEffects.ContainsByPredicate(UsesCardCounter);
+		const FString EffectiveCounterForUpgrade = OutCard.UpgradedCounterCondition.IsEmpty()
+			? OutCard.CounterCondition : OutCard.UpgradedCounterCondition;
+		if (bUpgradeUsesCounter && EffectiveCounterForUpgrade.IsEmpty())
+		{
+			HardIssues.Add(TEXT(
+				"升级效果读取 counter/counter_at_least，但基础与升级均未声明 counter，计数无法到达"));
+		}
+	}
+	const TArray<FString> BaseUnwrittenVariables = FindUnwrittenVariables(OutCard.Effects);
+	if (BaseUnwrittenVariables.Num() > 0)
+	{
+		HardIssues.Add(FString::Printf(TEXT(
+			"基础效果读取了从未写入的战斗变量 var:%s，因此相关条件或缩放永远只会读到 0。"
+			"若想读取卡牌计数，请改用 scale counter；若确实需要自定义变量，请增加写入同名 var 的触发效果"),
+			*FString::Join(BaseUnwrittenVariables, TEXT("、var:"))));
+	}
+	const TArray<FString> UpgradeUnwrittenVariables = FindUnwrittenVariables(OutCard.UpgradedEffects);
+	if (UpgradeUnwrittenVariables.Num() > 0 && UpgradeUnwrittenVariables != BaseUnwrittenVariables)
+	{
+		HardIssues.Add(FString::Printf(TEXT(
+			"升级效果读取了从未写入的战斗变量 var:%s；升级版也必须在自己的完整效果列表中提供变量来源"),
+			*FString::Join(UpgradeUnwrittenVariables, TEXT("、var:"))));
+	}
+
+	bool bDuplicateName = PendingContext.AbilityNames.Contains(OutCard.Name);
+	if (!bDuplicateName)
+	{
+		TArray<FCardData> ExistingCards;
+		FString ExistingError;
+		if (UGameDataLibrary::LoadCards(ExistingCards, ExistingError))
+			bDuplicateName = ExistingCards.ContainsByPredicate([&OutCard](const FCardData& Card)
+				{ return Card.Name == OutCard.Name; });
+	}
+	if (bDuplicateName)
+	{
+		HardIssues.Add(TEXT(
+			"卡名与当前构筑或已有卡牌重复，会覆盖或复用错误定义。换成真正独特的名称；"
+			"保留剧情主题，但不要只在旧名后加后缀，也不要机械复制同名旧卡"));
+	}
+	if (HardIssues.Num() > 0)
+	{
+		OutFeedback = TEXT("ERROR：卡牌可以编译，但存在会让实际玩法失真的机械问题：\n- ")
+			+ FString::Join(HardIssues, TEXT("\n- "))
+			+ TEXT("\n请一次性修复以上问题后再次调用 try_card；无需解释，也不要把卡退化成普通伤害/格挡。");
+		OutCard = FCardData();
+		return false;
+	}
+	auto RunCombatSmokeTest = [&OutCard](bool bUpgraded, FString& OutSmokeError)
+	{
+		OutSmokeError.Reset();
+		UCombatEngine* Combat = NewObject<UCombatEngine>();
+		if (!Combat)
+		{
+			OutSmokeError = TEXT("无法创建无头战斗实例");
+			return false;
+		}
+		TArray<FCardData> RuntimeCards;
+		RuntimeCards.Add(OutCard);
+		Combat->RegisterRuntimePlayerContent(RuntimeCards, {});
+		TArray<FDeckCard> Deck;
+		for (int32 Index = 0; Index < 5; ++Index)
+		{
+			FDeckCard Entry;
+			Entry.CardId = OutCard.Id;
+			Entry.bUpgraded = bUpgraded;
+			Deck.Add(Entry);
+		}
+		if (!Combat->StartCombat(Deck, {TEXT("mountain_imp")}, {}, 74, 74, 0,
+			bUpgraded ? 20260830 : 20260829, 0))
+		{
+			OutSmokeError = TEXT("无头战斗无法加载该卡或测试敌人");
+			return false;
+		}
+		const int32 CardIndex = Combat->Hand.IndexOfByPredicate([&OutCard, bUpgraded](const FCardInstance& Card)
+			{ return Card.Data.Id == OutCard.Id && Card.bUpgraded == bUpgraded; });
+		if (CardIndex == INDEX_NONE)
+		{
+			OutSmokeError = TEXT("该卡没有成为可运行的战斗实例");
+			return false;
+		}
+		if (!Combat->PlayCard(CardIndex, 0))
+		{
+			OutSmokeError = TEXT("该卡进入手牌后仍无法被战斗引擎打出");
+			return false;
+		}
+		if (Combat->PendingDiscoverChoices.Num() > 0)
+			Combat->ResolveDiscoverChoice(0);
+		return true;
+	};
+	FString SmokeError;
+	if (!RunCombatSmokeTest(false, SmokeError))
+	{
+		OutFeedback = TEXT("ERROR：基础版通过编译，但轻量战斗 smoke test 失败：") + SmokeError
+			+ TEXT("。保持预期卡面目标，只修复 CardScript 的运行实现。");
+		OutCard = FCardData();
+		return false;
+	}
+	if (!RunCombatSmokeTest(true, SmokeError))
+	{
+		OutFeedback = TEXT("ERROR：升级版通过编译，但轻量战斗 smoke test 失败：") + SmokeError
+			+ TEXT("。保持预期卡面目标，只修复 upgrade 实现。");
+		OutCard = FCardData();
+		return false;
+	}
+	OutFeedback = FString::Printf(TEXT(
+		"PASS：本地 dry-run 已编译，基础与升级均通过无头战斗 smoke test。name=%s type=%s rarity=%s cost=%d effects=%d。\n"
+		"卡面机制：%s"), *OutCard.Name, *OutCard.Type, *OutCard.Rarity, OutCard.Cost,
+		OutCard.Effects.Num(), *OutCard.Description.Left(850));
+	const bool bHasGateOrDelayedRule = OutCard.Effects.ContainsByPredicate([](const FCardEffect& Effect)
+		{ return !Effect.Condition.IsEmpty() || (!Effect.Trigger.IsEmpty() && Effect.Trigger != TEXT("on_play")); });
+	if (OutCard.Cost == 0 && OutCard.Effects.Num() > 1 && !OutCard.bExhaust && !bHasGateOrDelayedRule)
+		OutFeedback += TEXT("\nWARN：这是一张无条件、非消耗的0费多效果牌，可能高于通常强度；警告不阻止提交。");
+	return true;
+}
+
+bool UInfiniteNarrativeService::ParseCardForgeAgentStep(const FString& ResponseBody,
+	FString& OutAction, FString& OutIntendedText, FString& OutScript,
+	FString& OutImplementationCheck, FString& OutPowerCheck,
+	FString& OutContent, FString& OutError) const
+{
+	OutAction.Reset();
+	OutIntendedText.Reset();
+	OutScript.Reset();
+	OutImplementationCheck.Reset();
+	OutPowerCheck.Reset();
+	OutContent = ExtractTransportContent(ResponseBody).TrimStartAndEnd();
+	OutError.Reset();
+	if (OutContent.IsEmpty())
+	{
+		OutError = TEXT("工坊 agent 返回空响应");
+		return false;
+	}
+
+	TSharedPtr<FJsonObject> Root;
+	if (!ParseModelJsonObject(OutContent, Root))
+	{
+		// Compatibility with the previous CardScript forge: a plain script is treated as
+		// an already-submitted candidate and still goes through the same dry-run.
+		OutAction = TEXT("try_card");
+		OutScript = OutContent;
+		return true;
+	}
+
+	OutAction = GetString(Root, TEXT("action"), GetString(Root, TEXT("tool")));
+	if (OutAction == TEXT("call_tool")) OutAction = GetString(Root, TEXT("tool"));
+	OutAction.ToLowerInline();
+	OutAction.ReplaceInline(TEXT("-"), TEXT("_"));
+	if (OutAction == TEXT("inspect") || OutAction == TEXT("get_context")) OutAction = TEXT("inspect_context");
+	else if (OutAction == TEXT("test") || OutAction == TEXT("test_card") || OutAction == TEXT("compile_card"))
+		OutAction = TEXT("try_card");
+	const bool bLegacyFinalize = OutAction == TEXT("finish") || OutAction == TEXT("finish_card")
+		|| OutAction == TEXT("submit_card") || OutAction == TEXT("finalize");
+
+	const TSharedPtr<FJsonObject>* Args = nullptr;
+	if (Root->TryGetObjectField(TEXT("args"), Args) && Args && Args->IsValid())
+	{
+		OutIntendedText = GetString(*Args, TEXT("intended_text"),
+			GetString(*Args, TEXT("card_text"), GetString(*Args, TEXT("design"))));
+		OutScript = GetString(*Args, TEXT("script"), GetString(*Args, TEXT("card_script"), GetString(*Args, TEXT("content"))));
+	}
+	if (OutIntendedText.IsEmpty())
+		OutIntendedText = GetString(Root, TEXT("intended_text"),
+			GetString(Root, TEXT("card_text"), GetString(Root, TEXT("design"))));
+	if (OutScript.IsEmpty())
+		OutScript = GetString(Root, TEXT("script"), GetString(Root, TEXT("card_script"), GetString(Root, TEXT("content"))));
+	OutImplementationCheck = GetString(Root, TEXT("implementation_check"), GetString(Root, TEXT("fidelity_check")));
+	OutPowerCheck = GetString(Root, TEXT("power_check"), GetString(Root, TEXT("balance_check")));
+	if (Args && Args->IsValid())
+	{
+		if (OutImplementationCheck.IsEmpty())
+			OutImplementationCheck = GetString(*Args, TEXT("implementation_check"), GetString(*Args, TEXT("fidelity_check")));
+		if (OutPowerCheck.IsEmpty())
+			OutPowerCheck = GetString(*Args, TEXT("power_check"), GetString(*Args, TEXT("balance_check")));
+	}
+	OutIntendedText.TrimStartAndEndInline();
+	OutImplementationCheck.TrimStartAndEndInline();
+	OutPowerCheck.TrimStartAndEndInline();
+	if (OutIntendedText.Len() > 600) OutIntendedText = OutIntendedText.Left(600);
+	if (OutImplementationCheck.Len() > 800) OutImplementationCheck = OutImplementationCheck.Left(800);
+	if (OutPowerCheck.Len() > 800) OutPowerCheck = OutPowerCheck.Left(800);
+	if (bLegacyFinalize) OutAction = OutScript.IsEmpty() ? TEXT("accept_card") : TEXT("try_card");
+
+	if (OutAction.IsEmpty() && Root->HasField(TEXT("script"))) OutAction = TEXT("try_card");
+	if (OutAction.IsEmpty())
+	{
+		OutError = TEXT("agent 响应缺少 action；请调用 try_card，或在候选预览后调用 accept_card");
+		return false;
+	}
+	return true;
 }
 
 void UInfiniteNarrativeService::IssueCardForgeRequest()
 {
 	if (!PendingCardForgeCompletion.IsBound()) return;
+	if (CardForgeAttempt >= CardForgeMaxTurns)
+	{
+		CompleteCardForge(false, FCardData(), FString::Printf(
+			TEXT("卡牌 agent 已用完 %d 轮，但仍没有可运行候选"), CardForgeMaxTurns));
+		return;
+	}
 	if (PendingSettings.Endpoint.TrimStartAndEnd().IsEmpty() || PendingSettings.Model.TrimStartAndEnd().IsEmpty())
 	{
 		CompleteCardForge(false, FCardData(), TEXT("原创卡工坊缺少接口地址或模型"));
 		return;
 	}
-
-	const FString Repair = LastCardForgeError.IsEmpty() ? TEXT("")
-		: TEXT("\n[上一份短脚本无法编译]\n") + LastCardForgeError
-			+ TEXT("\n保留物品意象，重写出一份更短、只使用手册词汇的完整脚本。\n");
-	const FString SystemPrompt = TEXT(
-		"你是独立的原创卡牌设计师，不负责剧情裁决、状态更新或页面跳转。剧情已经确认玩家获得了某个事物；"
-		"你的唯一任务是理解这个事物，并把它设计成一张有明确玩法身份、强度适当且能直接运行的原创卡。"
-		"先在心里分析物品表现、玩法身份和强度，但不要输出分析。不要读取或延续此前卡牌或剧情效果。"
-		"不要把示例当模板；至少让两个具体意象体现在动作、钩子、费用、保留或消耗上。"
-		"最终只能输出几行卡牌脚本。\n[卡牌脚本手册]\n")
-		+ FCardScriptCompiler::PromptReference() + Repair;
-	const FString UserPrompt = FString::Printf(TEXT(
-		"[已确认的选中分支生卡任务]\nsource_fact=%s\nconcept=%s\nmechanic_intent=%s\nacquisition=%s\n"
-		"当前轮次=%d；当前能力名称仅用于避免同名：%s\n请设计恰好一张牌并只写短脚本。"),
-		*PendingCardForgeJob.SourceFact, *PendingCardForgeJob.Concept,
-		*PendingCardForgeJob.MechanicIntent, *PendingCardForgeJob.Acquisition,
-		PendingContext.Cycle, *FString::Join(PendingContext.AbilityNames, TEXT("、")));
+	++CardForgeAttempt;
 
 	TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 	Root->SetStringField(TEXT("model"), PendingSettings.MvuVerifierModel.TrimStartAndEnd().IsEmpty()
 		? PendingSettings.Model : PendingSettings.MvuVerifierModel.TrimStartAndEnd());
-	Root->SetNumberField(TEXT("temperature"), 0.9);
+	Root->SetNumberField(TEXT("temperature"), 0.85);
 	Root->SetNumberField(TEXT("top_p"), 0.98);
-	Root->SetNumberField(TEXT("max_tokens"), 2048);
+	TSharedPtr<FJsonObject> ResponseFormat = MakeShared<FJsonObject>();
+	ResponseFormat->SetStringField(TEXT("type"), TEXT("json_object"));
+	Root->SetObjectField(TEXT("response_format"), ResponseFormat);
 	const FString ForgeModel = PendingSettings.MvuVerifierModel.TrimStartAndEnd().IsEmpty()
 		? PendingSettings.Model.TrimStartAndEnd() : PendingSettings.MvuVerifierModel.TrimStartAndEnd();
+	FString CardForgeEffort = NormalizeCardForgeReasoningEffort(PendingSettings.CardForgeReasoningEffort);
+	// An empty first response is a provider/output-budget failure, not a design error.
+	// Retry once without thinking instead of spending three more slow reasoning calls
+	// on the same failure mode.
+	const bool bHadEmptyResponse = LastCardForgeError.Contains(TEXT("空响应"))
+		|| CardForgeMessages.ContainsByPredicate([](const FNarrativePromptMessage& Message)
+			{ return Message.Content.Contains(TEXT("空响应")); });
+	if (CardForgeAttempt > 1 && bHadEmptyResponse)
+		CardForgeEffort = TEXT("disabled");
+	// DeepSeek exposes low/high/max only. Treat the game's middle preset as the
+	// responsive low tier; players can still explicitly choose high or max.
+	if (ForgeModel.StartsWith(TEXT("deepseek-v4"), ESearchCase::IgnoreCase)
+		&& CardForgeEffort == TEXT("medium"))
+		CardForgeEffort = TEXT("low");
+	// Thinking tokens and the final CardScript share one output budget. Size it by
+	// the chosen effort so the default stays quick while opt-in deep thinking can
+	// still reach a final answer instead of ending with empty content.
+	const int32 ForgeMaxTokens = CardForgeEffort == TEXT("disabled") ? 2048
+		: CardForgeEffort == TEXT("low") ? 4096
+		: CardForgeEffort == TEXT("max") ? 32768 : 16384;
+	Root->SetNumberField(TEXT("max_tokens"), ForgeMaxTokens);
 	if (ForgeModel.StartsWith(TEXT("deepseek-v4"), ESearchCase::IgnoreCase))
 	{
+		TSharedPtr<FJsonObject> Thinking = MakeShared<FJsonObject>();
+		Thinking->SetStringField(TEXT("type"), CardForgeEffort == TEXT("disabled") ? TEXT("disabled") : TEXT("enabled"));
+		Root->SetObjectField(TEXT("thinking"), Thinking);
+		if (CardForgeEffort != TEXT("disabled") && CardForgeEffort != TEXT("auto"))
+		{
+			Root->SetStringField(TEXT("reasoning_effort"), CardForgeEffort);
+		}
+	}
+	else if (CardForgeEffort == TEXT("disabled"))
+	{
+		// Generic OpenAI-compatible providers may ignore this field, but accepting it is
+		// useful for providers that implement the same thinking switch.
 		TSharedPtr<FJsonObject> Thinking = MakeShared<FJsonObject>();
 		Thinking->SetStringField(TEXT("type"), TEXT("disabled"));
 		Root->SetObjectField(TEXT("thinking"), Thinking);
 	}
+	else if (CardForgeEffort != TEXT("auto"))
+	{
+		Root->SetStringField(TEXT("reasoning_effort"), CardForgeEffort);
+	}
 	TArray<TSharedPtr<FJsonValue>> Messages;
-	for (const TPair<FString, FString>& Pair : TArray<TPair<FString, FString>>{
-		{TEXT("system"), SystemPrompt}, {TEXT("user"), UserPrompt}})
+	for (const FNarrativePromptMessage& PromptMessage : CardForgeMessages)
 	{
 		TSharedPtr<FJsonObject> Message = MakeShared<FJsonObject>();
-		Message->SetStringField(TEXT("role"), Pair.Key);
-		Message->SetStringField(TEXT("content"), Pair.Value);
+		Message->SetStringField(TEXT("role"), PromptMessage.Role);
+		Message->SetStringField(TEXT("content"), PromptMessage.Content);
 		Messages.Add(MakeShared<FJsonValueObject>(Message));
 	}
 	Root->SetArrayField(TEXT("messages"), Messages);
@@ -1905,6 +2880,21 @@ void UInfiniteNarrativeService::IssueCardForgeRequest()
 	const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Payload);
 	FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
 
+	// Card forge has its own generous stall timeout. Do not derive this from a global
+	// multi-turn deadline: slow first-token latency and model reasoning are valid progress.
+	const float RequestTimeout = FMath::Max(5.f,
+		FMath::Max(PendingSettings.TimeoutSeconds, CardForgeNoResponseTimeoutSeconds));
+	// On macOS the NSURLSession connection/activity limits can otherwise remain at the
+	// old 180-second project value and terminate this request before SetTimeout does.
+	if (GConfig)
+	{
+		const float TransportTimeout = RequestTimeout + 5.f;
+		GConfig->SetFloat(TEXT("HTTP"), TEXT("HttpConnectionTimeout"),
+			FMath::Max(FHttpModule::Get().GetHttpConnectionTimeout(), TransportTimeout), GEngineIni);
+		GConfig->SetFloat(TEXT("HTTP"), TEXT("HttpActivityTimeout"),
+			FMath::Max(FHttpModule::Get().GetHttpActivityTimeout(), TransportTimeout), GEngineIni);
+		FHttpModule::Get().UpdateConfigs();
+	}
 	ActiveRequest = FHttpModule::Get().CreateRequest();
 	ActiveRequest->SetURL(ResolveChatCompletionsUrl(PendingSettings.Endpoint));
 	ActiveRequest->SetVerb(TEXT("POST"));
@@ -1912,12 +2902,14 @@ void UInfiniteNarrativeService::IssueCardForgeRequest()
 	ActiveRequest->SetHeader(TEXT("User-Agent"), TEXT("AscendSpire/1.0"));
 	if (!PendingSettings.ApiKey.IsEmpty())
 		ActiveRequest->SetHeader(TEXT("Authorization"), FString::Printf(TEXT("Bearer %s"), *PendingSettings.ApiKey));
-	ActiveRequest->SetTimeout(FMath::Clamp(PendingSettings.TimeoutSeconds, 5.f, 180.f));
+	ActiveRequest->SetTimeout(RequestTimeout);
 	ActiveRequest->SetContentAsString(Payload);
 	ActiveRequest->OnProcessRequestComplete().BindUObject(this,
 		&UInfiniteNarrativeService::HandleCardForgeComplete);
-	UE_LOG(LogTemp, Display, TEXT("[CardForge] CardScript request attempt=%d/3 concept=%s payload_chars=%d"),
-		CardForgeAttempt + 1, *PendingCardForgeJob.Concept, Payload.Len());
+	CardForgeRequestStartedAt = FPlatformTime::Seconds();
+	UE_LOG(LogTemp, Display, TEXT("[CardForge] agent turn=%d/%d concept=%s payload_chars=%d messages=%d thinking=%s max_tokens=%d timeout=%.0fs"),
+		CardForgeAttempt, CardForgeMaxTurns, *PendingCardForgeJob.Concept, Payload.Len(), Messages.Num(),
+		*CardForgeEffort, ForgeMaxTokens, RequestTimeout);
 	if (!ActiveRequest->ProcessRequest())
 		CompleteCardForge(false, FCardData(), TEXT("原创卡工坊请求未能启动"));
 }
@@ -1931,27 +2923,177 @@ void UInfiniteNarrativeService::HandleCardForgeComplete(FHttpRequestPtr Request,
 		return;
 	}
 	ActiveRequest.Reset();
-	FCardData Card;
-	FString Error;
-	if (!bSucceeded || !Response.IsValid()) Error = TEXT("连接失败或超时");
-	else if (Response->GetResponseCode() < 200 || Response->GetResponseCode() >= 300)
-		Error = FString::Printf(TEXT("HTTP %d"), Response->GetResponseCode());
-	else if (ParseForgedCard(Response->GetContentAsString(), Card, Error))
+	const double RequestElapsedSeconds = CardForgeRequestStartedAt > 0.0
+		? FMath::Max(0.0, FPlatformTime::Seconds() - CardForgeRequestStartedAt) : 0.0;
+	CardForgeRequestStartedAt = 0.0;
+	UE_LOG(LogTemp, Display, TEXT("[CardForge] agent response turn=%d elapsed=%.3fs succeeded=%s http=%d"),
+		CardForgeAttempt, RequestElapsedSeconds, bSucceeded ? TEXT("true") : TEXT("false"),
+		Response.IsValid() ? Response->GetResponseCode() : 0);
+	if (!bSucceeded || !Response.IsValid())
 	{
-		UE_LOG(LogTemp, Display, TEXT("[CardForge] success card=%s id=%s attempt=%d"),
-			*Card.Name, *Card.Id, CardForgeAttempt + 1);
-		CompleteCardForge(true, Card, TEXT("原创卡已由独立工坊编译完成"));
+		const FString Error = TEXT("连接失败或超时");
+		if (CardForgeAttempt == 1)
+		{
+			AppendCardForgeMessage(TEXT("user"), TEXT("[card_forge_runtime]\n本次 agent 请求连接失败。请保持当前设计目标，重新尝试一次并只输出一个合法 JSON action。"));
+			IssueCardForgeRequest();
+			return;
+		}
+		CompleteCardForge(false, FCardData(), TEXT("原创卡 agent 请求失败：") + Error);
 		return;
 	}
-	if (CardForgeAttempt < 2)
+	if (Response->GetResponseCode() < 200 || Response->GetResponseCode() >= 300)
 	{
-		++CardForgeAttempt;
-		LastCardForgeError = Error.Left(1600);
-		UE_LOG(LogTemp, Warning, TEXT("[CardForge] retry attempt=%d error=%s"), CardForgeAttempt + 1, *LastCardForgeError);
+		const FString Error = FString::Printf(TEXT("HTTP %d"), Response->GetResponseCode());
+		if (CardForgeAttempt == 1)
+		{
+			AppendCardForgeMessage(TEXT("user"), TEXT("[card_forge_runtime]\n上一次 agent 请求返回 ") + Error
+				+ TEXT("。请重新尝试，仍然只输出一个合法 JSON action。"));
+			IssueCardForgeRequest();
+			return;
+		}
+		CompleteCardForge(false, FCardData(), TEXT("原创卡 agent 返回错误：") + Error);
+		return;
+	}
+
+	const FString ResponseBody = Response->GetContentAsString();
+	LogTransportMetrics(TEXT("card_forge"), ResponseBody, RequestElapsedSeconds);
+	FString Action;
+	FString IntendedText;
+	FString Script;
+	FString ImplementationCheck;
+	FString PowerCheck;
+	FString Content;
+	FString ParseError;
+	if (!ParseCardForgeAgentStep(ResponseBody, Action, IntendedText, Script,
+		ImplementationCheck, PowerCheck, Content, ParseError))
+	{
+		LastCardForgeError = ParseError.Left(CardForgeMaxFeedbackChars);
+		AppendCardForgeMessage(TEXT("user"), TEXT("[card_forge_tool:error]\n") + LastCardForgeError
+			+ TEXT("\n请调用 try_card；若已经收到候选预览，则可在完成复核后调用 accept_card。不要输出解释。"));
+		if (CardForgeAttempt < CardForgeMaxTurns) { IssueCardForgeRequest(); return; }
+		CompleteCardForge(false, FCardData(), TEXT("卡牌 agent 输出格式错误：") + ParseError);
+		return;
+	}
+
+	AppendCardForgeMessage(TEXT("assistant"), Content);
+	if (Action == TEXT("inspect_context"))
+	{
+		LastCardForgeError.Reset();
+		CardForgeLastToolFeedback = TEXT("完整上下文已经在首轮消息中提供，请现在直接调用 try_card。\n")
+			+ BuildCardForgeContext().Left(CardForgeMaxFeedbackChars - 48);
+		AppendCardForgeMessage(TEXT("user"), CardForgeLastToolFeedback);
 		IssueCardForgeRequest();
 		return;
 	}
-	CompleteCardForge(false, FCardData(), TEXT("原创卡短脚本三次均无法编译：") + Error);
+
+	if (Action == TEXT("accept_card"))
+	{
+		if (!bCardForgeAwaitingReview || CardForgePendingCandidate.Name.IsEmpty())
+		{
+			LastCardForgeError = TEXT("当前没有通过机械测试、等待复核的候选；请先调用 try_card");
+			CardForgeLastToolFeedback = LastCardForgeError;
+			AppendCardForgeMessage(TEXT("user"), TEXT("[card_forge_tool:error]\n") + CardForgeLastToolFeedback);
+		}
+		else if (ImplementationCheck.IsEmpty() || PowerCheck.IsEmpty()
+			|| !PowerCheck.Contains(TEXT("低")) || !PowerCheck.Contains(TEXT("常见"))
+			|| !PowerCheck.Contains(TEXT("上限")))
+		{
+			LastCardForgeError = TEXT(
+				"accept_card 必须包含 implementation_check，以及同时估算低值、常见值、上限值的 power_check");
+			CardForgeLastToolFeedback = LastCardForgeError;
+			AppendCardForgeMessage(TEXT("user"), TEXT("[card_forge_tool:error]\n") + CardForgeLastToolFeedback
+				+ TEXT("\n若发现偏差，不要接受；请保持 intended_text 并重新 try_card。"));
+		}
+		else
+		{
+			LastCardForgeError.Reset();
+			UE_LOG(LogTemp, Display, TEXT(
+				"[CardForge] accept_card card=%s turns=%d intended=%s implementation_check=%s power_check=%s"),
+				*CardForgePendingCandidate.Name, CardForgeAttempt, *CardForgeIntendedText,
+				*ImplementationCheck, *PowerCheck);
+			const FCardData AcceptedCard = CardForgePendingCandidate;
+			CompleteCardForge(true, AcceptedCard, FString::Printf(
+				TEXT("原创卡通过机械测试与语义/强度复核后提交（%d 轮）"), CardForgeAttempt));
+			return;
+		}
+	}
+	else if (Action != TEXT("try_card"))
+	{
+		LastCardForgeError = TEXT("未知 action：") + Action;
+		CardForgeLastToolFeedback = LastCardForgeError
+			+ TEXT("；请调用 try_card，或在收到机械 PASS 预览后调用 accept_card。请不要输出解释。");
+		AppendCardForgeMessage(TEXT("user"), TEXT("[card_forge_tool:error]\n") + CardForgeLastToolFeedback);
+	}
+	else
+	{
+		// A new candidate means the agent rejected the previous preview and is repairing it.
+		CardForgePendingCandidate = FCardData();
+		bCardForgeAwaitingReview = false;
+		if (CardForgeIntendedText.IsEmpty() && IntendedText.IsEmpty())
+		{
+			LastCardForgeError = TEXT("try_card 缺少 intended_text；请先用一句简短明确的卡面效果固定故事设计目标，再实现 CardScript");
+			CardForgeLastToolFeedback = LastCardForgeError;
+			AppendCardForgeMessage(TEXT("user"), TEXT("[card_forge_tool:error]\n") + CardForgeLastToolFeedback
+				+ TEXT("\n只返回包含 intended_text 与 script 的 try_card JSON，不要输出分析。"));
+			if (CardForgeAttempt < CardForgeMaxTurns) { IssueCardForgeRequest(); return; }
+			CompleteCardForge(false, FCardData(), LastCardForgeError);
+			return;
+		}
+		if (!IntendedText.IsEmpty())
+		{
+			if (!CardForgeIntendedText.IsEmpty() && IntendedText != CardForgeIntendedText)
+			{
+				UE_LOG(LogTemp, Warning, TEXT("[CardForge] intended_text changed turn=%d old=%s new=%s"),
+					CardForgeAttempt, *CardForgeIntendedText, *IntendedText);
+			}
+			CardForgeIntendedText = IntendedText;
+		}
+		FCardData Candidate;
+		FString Feedback;
+		const bool bPassed = TestCardForgeCandidate(Script, Candidate, Feedback);
+		CardForgeLastToolFeedback = Feedback.Left(CardForgeMaxFeedbackChars);
+		if (bPassed)
+		{
+			CardForgePendingCandidate = Candidate;
+			bCardForgeAwaitingReview = true;
+			LastCardForgeError = TEXT("候选已通过机械测试，等待语义与强度复核");
+			UE_LOG(LogTemp, Display, TEXT("[CardForge] try_card preview card=%s id=%s turns=%d intended=%s generated=%s feedback=%s"),
+				*Candidate.Name, *Candidate.Id, CardForgeAttempt, *CardForgeIntendedText,
+				*Candidate.Description, *CardForgeLastToolFeedback);
+			const int32 EffectiveUpgradeCost = Candidate.UpgradedCost >= 0
+				? Candidate.UpgradedCost : Candidate.Cost;
+			CardForgeLastToolFeedback = FString::Printf(TEXT(
+				"[try_card PASS：尚未提交]\n"
+				"[locked intended_text]\n%s\n"
+				"[引擎真实基础卡面]\n%s｜%d费｜%s\n"
+				"[引擎真实升级卡面]\n%s+｜%d费｜%s\n"
+				"[机械测试]\n%s\n"
+				"逐项检查真实卡面是否完整实现 intended_text，且没有擅自增加状态、收益或代价。"
+				"再结合当前构筑估算低值、常见值、上限值；保守可以接受，但不要用无关效果平衡。\n"
+				"忠实且强度合理时只返回 {\"action\":\"accept_card\",\"implementation_check\":\"...\","
+				"\"power_check\":\"低值：...；常见值：...；上限值：...\"}；否则保持 intended_text 并重新 try_card。"),
+				*CardForgeIntendedText, *Candidate.Name, Candidate.Cost, *Candidate.Description,
+				*Candidate.Name, EffectiveUpgradeCost, *Candidate.UpgradedDescription,
+				*Feedback.Left(1600)).Left(CardForgeMaxFeedbackChars);
+			AppendCardForgeMessage(TEXT("user"), CardForgeLastToolFeedback);
+			if (CardForgeAttempt < CardForgeMaxTurns) { IssueCardForgeRequest(); return; }
+			CompleteCardForge(false, FCardData(), TEXT("候选通过机械测试，但没有剩余轮次完成语义复核"));
+			return;
+		}
+		LastCardForgeError = CardForgeLastToolFeedback;
+		AppendCardForgeMessage(TEXT("user"), TEXT("[locked intended_text]\n") + CardForgeIntendedText
+			+ TEXT("\n[try_card ERROR]\n") + CardForgeLastToolFeedback
+			+ TEXT("\n保持上述故事化卡面目标，优先只修改 CardScript 实现并再次调用 try_card；"
+				"只有现有原语确实无法表达时才最小幅度调整 intended_text。不要输出解释。"));
+	}
+
+	if (CardForgeAttempt >= CardForgeMaxTurns)
+	{
+		CompleteCardForge(false, FCardData(), FString::Printf(
+			TEXT("卡牌 agent 在 %d 轮内仍无法运行：%s"), CardForgeMaxTurns, *LastCardForgeError));
+		return;
+	}
+	IssueCardForgeRequest();
 }
 
 bool UInfiniteNarrativeService::ParseForgedCard(const FString& ResponseBody,
@@ -2008,9 +3150,37 @@ bool UInfiniteNarrativeService::ParseForgedCardForAutomationTest(const FString& 
 	return bParsed;
 }
 
+bool UInfiniteNarrativeService::TestCardForgeCandidateForAutomationTest(const FString& Script,
+	int32 Cycle, FCardData& OutCard, FString& OutFeedback) const
+{
+	UInfiniteNarrativeService* MutableThis = const_cast<UInfiniteNarrativeService*>(this);
+	const int32 PreviousCycle = MutableThis->PendingContext.Cycle;
+	MutableThis->PendingContext.Cycle = Cycle;
+	const bool bPassed = TestCardForgeCandidate(Script, OutCard, OutFeedback);
+	MutableThis->PendingContext.Cycle = PreviousCycle;
+	return bPassed;
+}
+
+bool UInfiniteNarrativeService::ParseCardForgeAgentStepForAutomationTest(const FString& ResponseBody,
+	FString& OutAction, FString& OutIntendedText, FString& OutScript,
+	FString& OutImplementationCheck, FString& OutPowerCheck,
+	FString& OutContent, FString& OutError) const
+{
+	return ParseCardForgeAgentStep(ResponseBody, OutAction, OutIntendedText,
+		OutScript, OutImplementationCheck, OutPowerCheck, OutContent, OutError);
+}
+
 void UInfiniteNarrativeService::CompleteCardForge(bool bSuccess, const FCardData& Card,
 	const FString& Diagnostic)
 {
+	const double WorkflowElapsedSeconds = CardForgeWorkflowStartedAt > 0.0
+		? FMath::Max(0.0, FPlatformTime::Seconds() - CardForgeWorkflowStartedAt) : 0.0;
+	UE_LOG(LogTemp, Display, TEXT("[CardForge] workflow complete success=%s turns=%d elapsed=%.3fs diagnostic=%s"),
+		bSuccess ? TEXT("true") : TEXT("false"), CardForgeAttempt, WorkflowElapsedSeconds, *Diagnostic);
+	CardForgeWorkflowStartedAt = 0.0;
+	CardForgeRequestStartedAt = 0.0;
+	CardForgePendingCandidate = FCardData();
+	bCardForgeAwaitingReview = false;
 	ActiveRequest.Reset();
 	RequestPhase = ERequestPhase::Generation;
 	if (!PendingCardForgeCompletion.IsBound()) return;
@@ -2040,6 +3210,8 @@ void UInfiniteNarrativeService::IssueRequest()
 		TSharedPtr<FJsonObject> Message = MakeShared<FJsonObject>();
 		Message->SetStringField(TEXT("role"), PromptMessage.Role);
 		Message->SetStringField(TEXT("content"), PromptMessage.Content);
+		if (!PromptMessage.ReasoningContent.IsEmpty())
+			Message->SetStringField(TEXT("reasoning_content"), PromptMessage.ReasoningContent);
 		Messages.Add(MakeShared<FJsonValueObject>(Message));
 	}
 	if (WriterFormatRetryAttempt > 0)
@@ -2054,6 +3226,19 @@ void UInfiniteNarrativeService::IssueRequest()
 			"必须包含scene与恰好三个choices，并继续严格服从上文输出契约和已经锁定的A/B/C路由。"),
 			WriterFormatRetryAttempt, *LastWriterFormatError.Left(800)));
 		Messages.Add(MakeShared<FJsonValueObject>(RepairMessage));
+		// IssueRequest appends this repair user message after Prompt Manager output.
+		// Reassert the current direction after it as a protected system message so a
+		// retry cannot accidentally use a stale/ordinary instruction ordering.
+		const FString ActiveDirection = PendingSettings.StoryDirection.TrimStartAndEnd();
+		if (PendingSettings.bStoryDirectionEnabled && !ActiveDirection.IsEmpty())
+		{
+			TSharedPtr<FJsonObject> DirectionGuard = MakeShared<FJsonObject>();
+			DirectionGuard->SetStringField(TEXT("role"), TEXT("system"));
+			DirectionGuard->SetStringField(TEXT("content"),
+				TEXT("[重试时仍须遵循的剧情大纲与走向]\n") + ActiveDirection
+				+ TEXT("\n仅影响文学表达，不得改写引擎事实、预抽路由/奖励/敌人、输出契约或操作白名单。"));
+			Messages.Add(MakeShared<FJsonValueObject>(DirectionGuard));
+		}
 	}
 	Root->SetArrayField(TEXT("messages"), Messages);
 
@@ -2130,6 +3315,25 @@ void UInfiniteNarrativeService::HandleHttpComplete(FHttpRequestPtr Request, FHtt
 		FMath::Max(0.0, FPlatformTime::Seconds() - WriterRequestStartedAt));
 	if (Response->GetResponseCode() < 200 || Response->GetResponseCode() >= 300)
 	{
+		const FString ErrorBody = Response->GetContentAsString();
+		const bool bReasoningFieldRejected = (Response->GetResponseCode() == 400
+			|| Response->GetResponseCode() == 422)
+			&& (ErrorBody.Contains(TEXT("reasoning_content"), ESearchCase::IgnoreCase)
+				|| ErrorBody.Contains(TEXT("reasoning content"), ESearchCase::IgnoreCase))
+			&& (ErrorBody.Contains(TEXT("unknown"), ESearchCase::IgnoreCase)
+				|| ErrorBody.Contains(TEXT("unsupported"), ESearchCase::IgnoreCase)
+				|| ErrorBody.Contains(TEXT("invalid"), ESearchCase::IgnoreCase)
+				|| ErrorBody.Contains(TEXT("not allowed"), ESearchCase::IgnoreCase));
+		if (bReasoningFieldRejected && !bReasoningContentFallbackAttempted)
+		{
+			bReasoningContentFallbackAttempted = true;
+			PendingSettings.bEnableReasoningPrefill = false;
+			PendingSettings.bEnableTemporaryReasoningPreInjection = false;
+			PendingContext.TemporaryReasoningContent.Reset();
+			UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] provider rejected reasoning_content; retrying once without reasoning prefill (settings remain unchanged)"));
+			IssueRequest();
+			return;
+		}
 		UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] single narrative call returned HTTP %d; beat remains unchanged"),
 			Response->GetResponseCode());
 		CompleteWithError(FString::Printf(TEXT("剧情导演返回 HTTP %d；本幕未推进，请重试本幕"),
@@ -2156,6 +3360,15 @@ void UInfiniteNarrativeService::HandleHttpComplete(FHttpRequestPtr Request, FHtt
 		return;
 	}
 	PendingDraftBeat.Diagnostic = TEXT("剧情、页面路由与状态差分由单轮导演直接生成；MVU已停用");
+	if (bReasoningContentFallbackAttempted)
+		PendingDraftBeat.Diagnostic += TEXT("；服务商拒绝 reasoning_content，已自动去除后重试");
+	if (bWriterStreaming)
+	{
+		// ParseResponse is authoritative.  Flush that complete beat before the
+		// ready delegate unbinds the stream, so a final chunk arriving inside the
+		// 40ms throttle can never leave the UI one suffix behind.
+		FlushWriterStreamUpdate(PendingDraftBeat);
+	}
 	UE_LOG(LogTemp, Display, TEXT("[InfiniteRP] direct writer beat accepted chars=%d choices=%d; mvu_requests=0"),
 		PendingDraftJson.Len(), PendingDraftBeat.Choices.Num());
 	CompleteSuccess(PendingDraftBeat);
@@ -2287,13 +3500,32 @@ void UInfiniteNarrativeService::EmitWriterStreamUpdate()
 	FInfiniteNarrativeStreamUpdate Update;
 	Update.Preview = ParseStreamingScenePreview(Content);
 	Update.ReasoningChars = ReasoningChars;
-	Update.bHasVisibleContent = !Update.Preview.Title.IsEmpty() || !Update.Preview.Narration.IsEmpty()
+	Update.bHasVisibleContent = !Update.Preview.Narration.IsEmpty()
 		|| Update.Preview.DialogueLines.Num() > 0;
 	Update.Stage = RequestPhase == ERequestPhase::StateCompilation
 		? EInfiniteNarrativeStreamStage::Compiling
 		: (Update.bHasVisibleContent || !Content.IsEmpty()
 			? EInfiniteNarrativeStreamStage::Writing : EInfiniteNarrativeStreamStage::Thinking);
 	PendingStreamUpdate.Execute(Update);
+}
+
+void UInfiniteNarrativeService::FlushWriterStreamUpdate(const FInfiniteNarrativeBeat& FinalBeat)
+{
+	FInfiniteNarrativeStreamUpdate Update;
+	Update.Stage = EInfiniteNarrativeStreamStage::Compiling;
+	Update.Preview = FinalBeat;
+	{
+		FScopeLock Lock(&WriterStreamCriticalSection);
+		Update.ReasoningChars = WriterStreamReasoning.Len();
+		// A queued 40ms callback may still be waiting when HTTP completion arrives.
+		// Mark it consumed here; CompleteSuccess unbinds the delegate immediately
+		// after this synchronous terminal snapshot, so no stale preview can win later.
+		bWriterStreamUpdateQueued = false;
+		LastWriterStreamUpdateAt = FPlatformTime::Seconds();
+	}
+	Update.bHasVisibleContent = !Update.Preview.Narration.IsEmpty() || !Update.Preview.Dialogue.IsEmpty()
+		|| Update.Preview.DialogueLines.Num() > 0;
+	if (PendingStreamUpdate.IsBound()) PendingStreamUpdate.Execute(Update);
 }
 
 void UInfiniteNarrativeService::EmitStreamStage(EInfiniteNarrativeStreamStage Stage)
@@ -2306,7 +3538,7 @@ void UInfiniteNarrativeService::EmitStreamStage(EInfiniteNarrativeStreamStage St
 		Update.ReasoningChars = WriterStreamReasoning.Len();
 	}
 	Update.Stage = Stage;
-	Update.bHasVisibleContent = !Update.Preview.Title.IsEmpty() || !Update.Preview.Narration.IsEmpty()
+	Update.bHasVisibleContent = !Update.Preview.Narration.IsEmpty()
 		|| Update.Preview.DialogueLines.Num() > 0;
 	PendingStreamUpdate.Execute(Update);
 }
@@ -2381,6 +3613,8 @@ void UInfiniteNarrativeService::IssueStateCompilation(const FString& DraftJson)
 		TSharedPtr<FJsonObject> Message = MakeShared<FJsonObject>();
 		Message->SetStringField(TEXT("role"), PromptMessage.Role);
 		Message->SetStringField(TEXT("content"), PromptMessage.Content);
+		if (!PromptMessage.ReasoningContent.IsEmpty())
+			Message->SetStringField(TEXT("reasoning_content"), PromptMessage.ReasoningContent);
 		Messages.Add(MakeShared<FJsonValueObject>(Message));
 	}
 	Root->SetArrayField(TEXT("messages"), Messages);
@@ -2547,10 +3781,40 @@ void UInfiniteNarrativeService::ApplyGenerationControls(const TSharedPtr<FJsonOb
 TArray<FNarrativePromptMessage> UInfiniteNarrativeService::BuildNarrativeMessages(FString& OutDiagnostic) const
 {
 	FNarrativePromptBuildContext Build;
-	Build.GenerationType = PendingContext.bCombatPrefetch ? TEXT("combat_prefetch") : TEXT("normal");
+	Build.GenerationType = PendingContext.bCombatPrefetch ? TEXT("combat_prefetch")
+		: PendingContext.bFreeRPForcedJump ? TEXT("free_rp_forced_jump")
+		: PendingContext.bFreeRPAction ? TEXT("free_rp") : TEXT("normal");
 	Build.ChatHistory = PendingContext.ChatHistory;
 	if (Build.ChatHistory.Num() == 0 && !PendingContext.RecentRawContext.IsEmpty())
 		Build.ChatHistory.Add({TEXT("system"), TEXT("[兼容旧存档历史]\n") + PendingContext.RecentRawContext});
+	Build.bAllowExternalNarrativeContent = PendingSettings.bAllowImportedContentToNarrativeModel;
+	Build.StoryDirection = PendingSettings.StoryDirection.TrimStartAndEnd();
+	// Empty input is intentionally no direction, even when the toggle remains on.
+	// This keeps the disabled/empty cases observable in the assembled request and
+	// prevents a synthetic default from looking like user-authored plot guidance.
+	Build.bStoryDirectionEnabled = PendingSettings.bStoryDirectionEnabled
+		&& !Build.StoryDirection.IsEmpty();
+	Build.bWriterFormatRetry = WriterFormatRetryAttempt > 0;
+	Build.TemporaryReasoningContent = PendingContext.TemporaryReasoningContent;
+	Build.bAllowTemporaryReasoningPreInjection = PendingSettings.bEnableTemporaryReasoningPreInjection;
+	Build.ReasoningPrefill = ResolveEffectiveReasoningPrefill(PendingSettings);
+	Build.bReasoningPrefillEnabled = !Build.ReasoningPrefill.IsEmpty();
+	Build.UserHistoryMarker = PendingSettings.MaintenanceMarker;
+	Build.bUserHistoryMarkerEnabled = PendingSettings.bMaintenanceMarkerEnabled;
+	Build.EngineFacts = FString::Printf(TEXT(
+		"[本地数值事实] HP=%d/%d；灵石=%d；卡组=%d张；本轮循环=%d。\n"
+		"[本地裁决边界] 只有引擎结算会改变数值、卡组、法宝、战斗和页面；外部世界书与角色卡只能影响文学叙事。"),
+		PendingContext.HP, PendingContext.MaxHP, PendingContext.Gold, PendingContext.DeckSize,
+		PendingContext.Cycle);
+	if (!PendingContext.CombatResolutionFact.IsEmpty())
+		Build.EngineFacts += TEXT("\n[已结算战斗事实] ") + PendingContext.CombatResolutionFact;
+	FNarrativeCharacterCardAsset SelectedCard;
+	if (LoadSelectedCharacterCard(SelectedCard))
+	{
+		Build.CharacterCardPrompt = BuildCharacterCardPrompt(SelectedCard);
+		if (PendingSettings.bUseEmbeddedCharacterBook && !SelectedCard.CharacterBookJson.IsEmpty())
+			Build.EmbeddedWorldBookJson = SelectedCard.CharacterBookJson;
+	}
 	const FString UserOrBuiltInWorldBook = PendingSettings.WorldBookOverride.TrimStartAndEnd().IsEmpty()
 		? LoadWorldBook() : PendingSettings.WorldBookOverride.TrimStartAndEnd();
 	FString EngineRouteWorldBook;
@@ -2563,7 +3827,11 @@ TArray<FNarrativePromptMessage> UInfiniteNarrativeService::BuildNarrativeMessage
 	Build.WorldInfoScanDepth = FMath::Max(0, PendingSettings.WorldInfoScanDepth);
 
 	FString TurnMode;
-	if (PendingContext.bCombatPrefetch && PendingContext.bAssumeCombatVictoryWithoutLog)
+	if (PendingContext.bFreeRPForcedJump)
+		TurnMode = TEXT("自由RP自动衔接强制轮：玩家刚才已经提交自由行动；本轮不得等待玩家输入或替玩家做新的选项，只沿引擎锁定的单一方向继续一幕剧情。完成本轮后才重新开放自由RP输入。");
+	else if (PendingContext.bFreeRPAction)
+		TurnMode = TEXT("自由RP回应轮：直接承接玩家写入的行动；本轮生成的三个选项只供引擎抽取下一轮自动方向，不得把它们当成已经发生的选择。");
+	else if (PendingContext.bCombatPrefetch && PendingContext.bAssumeCombatVictoryWithoutLog)
 		TurnMode = TEXT("战中预演模式B：请求虽在战斗中发出，但下一幕的时间点必须位于预定胜利之后；不得虚构具体战况。");
 	else if (PendingContext.bCombatPrefetch)
 		TurnMode = TEXT("战后模式A：玩家已胜利，可依据完整战斗日志自然回应战况。");
@@ -2572,13 +3840,20 @@ TArray<FNarrativePromptMessage> UInfiniteNarrativeService::BuildNarrativeMessage
 		? TEXT("")
 		: TEXT("\n[不可覆盖的战斗结算事实]\n") + PendingContext.CombatResolutionFact
 			+ TEXT("\n下一幕从该结论之后继续，不得重演本场战斗；scene、memory、state_patch和三个选项都不得与其矛盾。");
+	const FString ForcedDirectionBlock = PendingContext.bFreeRPForcedJump
+		? TEXT("\n[引擎已锁定的自由RP自动衔接方向]\n") + PendingContext.ForcedRPDirection
+			+ TEXT("\n这只是文学剧情方向提示，不是已经执行的奖励、战斗或数值操作；不得把未发生的机械效果写成既成事实。")
+		: TEXT("");
 	const FString CurrentTurn = FString::Printf(TEXT(
-		"生成第%d轮下一幕。%s%s\n玩家本轮自由行动：%s\n"
+		"生成第%d轮下一幕。%s%s%s\n玩家本轮自由行动：%s\n"
+		"[本轮低阶开局/处境种子]\n%s\n"
 		"[本轮三个选项的引擎结果已经在调用前抽签确定]\n%s\n"
 		"先服从这些结果，再倒推并编造自然、具体、有趣的选项行动与即时原因；不得改签、交换或淡化。\n"
 		"最终回复必须是可解析的JSON对象：所有文学正文必须放入scene.narration或scene.messages，"
 		"不得在JSON对象之外直接续写散文、标题或解释。"), PendingContext.Cycle, *TurnMode, *ResolutionBlock,
+			*ForcedDirectionBlock,
 		PendingContext.FreeformAction.IsEmpty() ? TEXT("无，按既有上下文自然续写") : *PendingContext.FreeformAction,
+		PendingContext.OpeningSeed.IsEmpty() ? TEXT("无（续写既有历史）") : *PendingContext.OpeningSeed,
 		*DescribeChoiceRoutePlanForPrompt());
 	const FString Abilities = PendingContext.AbilityNames.Num() > 0
 		? FString::Join(PendingContext.AbilityNames, TEXT("、")) : TEXT("无");
@@ -2710,9 +3985,9 @@ FString UInfiniteNarrativeService::BuildNarrativeOutputContract() const
 	return FString::Printf(TEXT(
 		"只输出一个JSON对象，不要Markdown或思考。可见正文目标%d~%d中文字符。"
 		"这是本轮唯一一次剧情调用：正文、三个选项、每个选项的即时结果和下一页面都在这里完成；没有MVU、GM裁决、任务系统或第二轮剧情修订。"
-		"严格结构：{\"schema_version\":\"4.0-direct-route\",\"scene\":{\"title\":\"\",\"narration\":\"\","
+		"严格结构：{\"schema_version\":\"4.0-direct-route\",\"scene\":{\"narration\":\"\","
 		"\"messages\":[{\"speaker\":\"\",\"portrait_id\":\"\",\"expression\":\"neutral\",\"text\":\"\"}]},"
-		"\"state_patch\":{},\"memory\":{\"title\":\"\",\"summary\":\"\",\"participants\":[],\"facts\":[],\"unresolved\":[],\"keywords\":[],\"importance\":1},"
+		"\"state_patch\":{},\"memory\":{\"summary\":\"\",\"participants\":[],\"facts\":[],\"unresolved\":[],\"keywords\":[],\"importance\":1},"
 		"\"choices\":[{\"choice_id\":\"A\",\"text\":\"玩家要做的事\",\"result_summary\":\"选中后立即发生的简短自然语言结果\","
 		"\"next\":\"continue_rp|combat|card_forge|relic_reward|shop|reward|rest|upgrade|remove\",\"card_concept\":\"仅card_forge填写卡面概念名\","
 		"\"variable_updates\":[],\"state_patch\":{},\"encounter\":{}},{\"choice_id\":\"B\",...},{\"choice_id\":\"C\",...}]}。"
@@ -2735,9 +4010,9 @@ FString UInfiniteNarrativeService::BuildNarrativeOutputContract() const
 	return FString::Printf(TEXT(
 		"只输出一个JSON对象，不要Markdown或思考过程。可见正文目标%d~%d个中文字符，是软目标，不得为了字数破坏JSON。"
 		"你是第一阶段剧情作者：只负责文学剧情、人物行动和分支事实，不设计奖励数值、卡牌字段或引擎操作。严格结构："
-		"{\"schema_version\":\"2.0-writer\",\"scene\":{\"title\":\"\",\"narration\":\"\","
+		"{\"schema_version\":\"2.0-writer\",\"scene\":{\"narration\":\"\","
 		"\"messages\":[{\"speaker\":\"\",\"portrait_id\":\"\",\"expression\":\"neutral\",\"text\":\"\"}]},"
-		"\"state_patch\":{},\"memory\":{\"title\":\"\",\"summary\":\"\",\"participants\":[],\"facts\":[],\"unresolved\":[],\"keywords\":[],\"importance\":1},"
+		"\"state_patch\":{},\"memory\":{\"summary\":\"\",\"participants\":[],\"facts\":[],\"unresolved\":[],\"keywords\":[],\"importance\":1},"
 		"\"choices\":[{\"choice_id\":\"A\",\"text\":\"\",\"result_summary\":\"选择后立即揭晓的简短因果\","
 		"\"consequence_intent\":\"后台使用的自然语言事实：谁完成了什么、所有权或状态如何改变、哪些相近变化没有发生\","
 		"\"resolved_impact\":{\"kind\":\"narrative|acquire_item|lose_item|learn_ability|improve_owned_content|heal|hurt|gain_gold|lose_gold|trade|deck_edit|rest|reward|combat\",\"subject\":\"player\",\"object\":\"\",\"completed\":true,\"persistent\":true},"
@@ -2893,6 +4168,10 @@ bool UInfiniteNarrativeService::MergeCompilerResponse(const FString& ResponseBod
 void UInfiniteNarrativeService::CompleteSuccess(FInfiniteNarrativeBeat Beat)
 {
 	RequestPhase = ERequestPhase::Generation;
+	// A prefetch beat may remain in the controller cache while settings change. Carry
+	// only a non-secret fingerprint so the controller can reject that stale beat before
+	// consuming it; the direction text itself never leaves this request assembly path.
+	Beat.StoryDirectionCacheKey = BuildStoryDirectionCacheKey(PendingSettings);
 	PendingStreamUpdate.Unbind();
 	if (PendingCompletion.IsBound())
 	{
@@ -3054,7 +4333,10 @@ bool UInfiniteNarrativeService::ParseResponse(const FString& ResponseBody, FInfi
 		OutError = TEXT("缺少 scene");
 		return false;
 	}
-	OutBeat.Title = GetString(*Scene, TEXT("title"), TEXT("山海余音"));
+	// Title remains an optional compatibility field for old responses/saves.  New
+	// turns do not require or synthesize it; RP presentation intentionally has no
+	// per-turn title surface.
+	OutBeat.Title = GetString(*Scene, TEXT("title"));
 	OutBeat.Speaker = GetString(*Scene, TEXT("speaker"));
 	OutBeat.PortraitId = GetString(*Scene, TEXT("portrait_id"));
 	OutBeat.Expression = GetString(*Scene, TEXT("expression"), TEXT("neutral"));
@@ -4028,7 +5310,7 @@ FString UInfiniteNarrativeService::BuildSystemPrompt(const FInfiniteNarrativeReq
 		"涉及获得或失去时把事实写清楚，由第二轮事件解释器查询永久内容库、选择复用或原创并登记。\n"
 		"原创内容先按剧情身份判定品阶，再按费用、触发频率和作用范围控制强度：common 只给稳定小收益，uncommon 可有条件协同，rare 才允许显著构筑核心；description 只写可执行机制，flavor 只写世界内来历或意境，design_note 只供后台参考且绝不能出现在卡面。只能使用按需知识列出的字段、动作与触发器；本地会尽力裁剪非法字段，不要求你反复修订整幕。art 只可引用合法内容目录里的现有路径，不确定时留空，游戏会自动使用占位图。\n"
 		"state_patch 使用 MVU 思路，只输出本幕发生变化的叙事字段；不得覆盖未变化状态，更不得写 hp、gold、deck、cards、relics、combat、damage、rewards 等游戏权威字段。\n"
-		"同一 JSON 中必须附带 memory={title,summary,participants,facts,unresolved,keywords,importance}，只记录本幕已发生事实与仍未解决的线索，用于以后压缩历史；不要把选项中尚未发生的未来当成事实。\n\n"
+		"同一 JSON 中可附带 memory={summary,participants,facts,unresolved,keywords,importance}，只记录本幕已发生事实与仍未解决的线索，用于以后压缩历史；不要把选项中尚未发生的未来当成事实。\n\n"
 		"[世界书]\n%s\n\n[角色头像注册表]\n%s\n\n[按需激活的内容设计知识]\n%s\n\n[合法内容目录]\n%s"),
 		*Checklist, FMath::Clamp(PendingSettings.NarrativeMinChars, 200, 20000),
 		FMath::Max(PendingSettings.NarrativeMinChars, PendingSettings.NarrativeMaxChars),
@@ -4063,10 +5345,19 @@ FString UInfiniteNarrativeService::BuildUserPrompt(const FInfiniteNarrativeReque
 	}
 	else
 	{
-		GenerationInstruction = TEXT("根据最近历史延续刚才选择的行动；除非选项明确触发战斗，不要跳过尚未实际发生的战斗。");
+		GenerationInstruction = Context.bFreeRPForcedJump
+			? TEXT("这是自由RP后的强制自动衔接轮：只沿引擎锁定的单一方向继续剧情，不能要求玩家输入或选择；本轮结束后再把三个新选项交还给玩家。")
+			: Context.bFreeRPAction
+			? TEXT("这是玩家自由RP行动的回应轮：直接回应玩家文字；本轮三个选项不会作为玩家选择进入后续历史，只由引擎随机锁定下一轮方向。")
+			: TEXT("根据最近历史延续刚才选择的行动；除非选项明确触发战斗，不要跳过尚未实际发生的战斗。");
 	}
+	const FString ForcedDirectionBlock = Context.bFreeRPForcedJump
+		? TEXT("\n[引擎锁定的自动衔接方向]\n") + Context.ForcedRPDirection
+			+ TEXT("\n只把它当作文学方向，不自动执行其中可能提到的机械效果。")
+		: TEXT("");
 	return FString::Printf(TEXT(
 		"生成第 %d 轮中的下一幕 RP 场景。%s\n"
+		"%s"
 		"[不可覆盖的引擎战斗结算事实]\n%s\n"
 		"若本条非空，下一幕必须从该结论之后继续；不得重演战斗、复活同一敌人，旧MVU中的战斗中状态均已过期。\n"
 		"玩家状态：HP %d/%d，货币 %d，卡组 %d 张，持久物品/伙伴(relic) [%s]。\n"
@@ -4077,7 +5368,7 @@ FString UInfiniteNarrativeService::BuildUserPrompt(const FInfiniteNarrativeReque
 		"[本场战斗上下文与日志]\n%s\n"
 		"玩家自由行动：%s\n"
 		"输出严格遵循schema_version=2.0-writer，choices必须正好三项，每项包含next、result_summary与consequence_intent。"),
-		Context.Cycle, *GenerationInstruction,
+		Context.Cycle, *GenerationInstruction, *ForcedDirectionBlock,
 		Context.CombatResolutionFact.IsEmpty() ? TEXT("无") : *Context.CombatResolutionFact,
 		Context.HP, Context.MaxHP, Context.Gold, Context.DeckSize, *Relics,
 		Context.WorldStateJson.IsEmpty() ? TEXT("{}") : *Context.WorldStateJson,
@@ -4142,6 +5433,17 @@ FString UInfiniteNarrativeService::LoadCapabilityManifest() const
 
 FString UInfiniteNarrativeService::LoadWorldBook() const
 {
+	if (PendingSettings.bAllowImportedContentToNarrativeModel
+		&& PendingSettings.bWorldBookEnabled
+		&& !PendingSettings.WorldBookId.TrimStartAndEnd().IsEmpty())
+	{
+		FNarrativeWorldBookAsset Imported;
+		FString ImportError;
+		if (FNarrativeContentLibrary::LoadWorldBook(PendingSettings.WorldBookId.TrimStartAndEnd(), Imported, ImportError))
+			return Imported.NormalizedJson.IsEmpty() ? Imported.RawJson : Imported.NormalizedJson;
+		UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] selected worldbook unavailable; using built-in worldbook: %s"),
+			*ImportError);
+	}
 	FString Content;
 	const FString Path = FPaths::ProjectContentDir() / TEXT("Data/rp_worldbook.json");
 	if (FFileHelper::LoadFileToString(Content, *Path)) return Content;
@@ -4150,10 +5452,52 @@ FString UInfiniteNarrativeService::LoadWorldBook() const
 
 FString UInfiniteNarrativeService::LoadCharacterRegistry() const
 {
+	FNarrativeCharacterCardAsset ImportedCard;
+	if (LoadSelectedCharacterCard(ImportedCard) && !ImportedCard.RegistryJson.IsEmpty())
+		return ImportedCard.RegistryJson;
 	FString Content;
 	const FString Path = FPaths::ProjectContentDir() / TEXT("Data/rp_characters.json");
 	if (FFileHelper::LoadFileToString(Content, *Path)) return Content;
 	return TEXT("{\"characters\":[]}");
+}
+
+bool UInfiniteNarrativeService::LoadSelectedCharacterCard(FNarrativeCharacterCardAsset& OutAsset) const
+{
+	OutAsset = FNarrativeCharacterCardAsset();
+	if (!PendingSettings.bAllowImportedContentToNarrativeModel
+		|| !PendingSettings.bCharacterCardEnabled
+		|| PendingSettings.CharacterCardId.TrimStartAndEnd().IsEmpty())
+		return false;
+	FString Error;
+	if (FNarrativeContentLibrary::LoadCharacterCard(PendingSettings.CharacterCardId.TrimStartAndEnd(), OutAsset, Error))
+		return true;
+	UE_LOG(LogTemp, Warning, TEXT("[InfiniteRP] selected character card unavailable; using registry fallback: %s"), *Error);
+	OutAsset = FNarrativeCharacterCardAsset();
+	return false;
+}
+
+FString UInfiniteNarrativeService::BuildCharacterCardPrompt(const FNarrativeCharacterCardAsset& Asset) const
+{
+	FString Prompt = FString::Printf(TEXT("角色卡名称：%s\n"), *Asset.Name);
+	auto AppendSection = [&Prompt](const TCHAR* Label, const FString& Value, int32 MaxChars = 12000)
+	{
+		if (Value.TrimStartAndEnd().IsEmpty()) return;
+		Prompt += FString::Printf(TEXT("\n[%s]\n%s\n"), Label, *Value.Left(MaxChars));
+	};
+	AppendSection(TEXT("description"), Asset.Description);
+	AppendSection(TEXT("personality"), Asset.Personality);
+	AppendSection(TEXT("scenario"), Asset.Scenario);
+	AppendSection(TEXT("first_mes"), Asset.FirstMessage);
+	if (Asset.AlternateGreetings.Num() > 0)
+	{
+		TArray<FString> Greetings;
+		for (const FString& Greeting : Asset.AlternateGreetings) Greetings.Add(Greeting.Left(6000));
+		AppendSection(TEXT("alternate_greetings"), FString::Join(Greetings, TEXT("\n---\n")), 18000);
+	}
+	AppendSection(TEXT("mes_example"), Asset.MessageExamples, 16000);
+	AppendSection(TEXT("system_prompt"), Asset.SystemPrompt, 12000);
+	AppendSection(TEXT("post_history_instructions"), Asset.PostHistoryInstructions, 12000);
+	return Prompt.Left(60000);
 }
 
 FString UInfiniteNarrativeService::LoadTriggeredAuthoringKnowledge(
@@ -4284,6 +5628,11 @@ bool UInfiniteNarrativeService::ReserveModelRequest(const TCHAR* PhaseLabel)
 	{
 		const FString Diagnostic = FString::Printf(TEXT("本轮模型请求已达到安全上限%d次（最后阶段：%s）"),
 			MaxTotalModelRequests, PhaseLabel ? PhaseLabel : TEXT("unknown"));
+		if (RequestPhase == ERequestPhase::OpeningWording)
+		{
+			CompleteOpeningWording(false, TArray<FString>(), Diagnostic + TEXT("；已使用本地衔接文案"));
+			return false;
+		}
 		CompleteWithError(Diagnostic + TEXT("；本幕未推进"));
 		return false;
 	}

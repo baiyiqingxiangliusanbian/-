@@ -18,12 +18,14 @@ class UCanvasPanel;
 class UOverlay;
 class USizeBox;
 class UHorizontalBox;
-class USoundWaveProcedural;
+class UAscendAudioRouter;
 class UEditableTextBox;
 class UCheckBox;
 class UComboBoxString;
 class UMultiLineEditableTextBox;
 class UScrollBox;
+class USlider;
+enum class ECombatStrikeStyle : uint8;
 
 UENUM()
 enum class EGameScreen : uint8
@@ -52,8 +54,53 @@ public:
 	/** 激活游戏窗口（提到前台 + 请求焦点） */
 	void ActivateGameWindow();
 
+	/**
+	 * Deterministic authored-opening fixture exposed for the headless regression
+	 * commandlet. It does not touch a run, save, UI, or the narrative service.
+	 */
+	static FInfiniteNarrativeBeat BuildAuthoredOpeningForAutomationTest(int32 OpeningIndex,
+		const TArray<FRelicData>& OpeningRelics);
+	/** Pure legacy-opening copy filter used before displaying a restored choice. */
+	static FString FilterAuthoredOpeningChoiceForAutomationTest(const FString& OpeningId, int32 ChoiceIndex,
+		const FRelicData& Relic, const FString& StoredText);
+	static FString FilterAuthoredOpeningChoiceForAutomationTest(const FString& OpeningId, int32 ChoiceIndex,
+		const TArray<FRelicData>& LockedRelics, const FString& StoredText);
+	/** Pure RP text/layout guards for the offline commandlet; creates no UMG or save data. */
+	static bool ValidateRPNarrativeDisplayForAutomationTest(FString& OutDiagnostic);
+	/** Pure terminal merge guard shared by streaming UI and offline regression tests. */
+	static bool MergeRPStreamTextForAutomationTest(const FString& ExistingText,
+		const FString& IncomingText, FString& OutText, bool& bOutRebuilt);
+	/** Pure dialogue normalization used before both glyph and wrapped-bubble display. */
+	static FString NormalizeRPDialogueForAutomationTest(const FString& Text);
+	/** Stable metadata key; a portrait/expression change must replace only its row. */
+	static FString MakeRPDialogueIdentityKeyForAutomationTest(const FString& Speaker,
+		const FString& PortraitId, const FString& Expression);
+	/** Pure scroll policy: terminal content follows only when already near the end. */
+	static bool ShouldAutoScrollRPStreamForAutomationTest(float ScrollOffset, float EndOffset);
+	/** Development-only fixed-text RP display. Never starts a run, calls the service, or saves. */
+	void StartRPNarrativeVisualTest();
+	void LogRPNarrativeVisualGeometry(int32 Step, const TCHAR* Prefix) const;
+
+	/** Shared pure gates for the background combat-narrative prefetch state machine. */
+	static bool ShouldStartCombatNarrativePrefetch(bool bInfiniteNarrativeMode, bool bRunActive,
+		bool bRequestInFlight, bool bPrefetchReady);
+	static bool ShouldPrefetchAtCombatStart(bool bFirstInfiniteCombat,
+		bool bGenerateAfterCombatWithLog);
+	/** Pure free-RP cadence gate shared by the UI and headless regression tests. */
+	static bool IsFreeRPInputAvailableForAutomationTest(bool bFreeRPModeEnabled,
+		bool bForcedJumpPending, bool bRequestInFlight, bool bOpeningPending);
+	/** Pure gate for the explicit pause between a free-RP response and its forced jump. */
+	static bool IsFreeRPForcedContinueAvailableForAutomationTest(bool bForcedJumpPending,
+		bool bAwaitingContinue, bool bRequestInFlight);
+	/** Deterministic per-turn random selection of the direction used by the forced jump. */
+	static int32 ChooseFreeRPForcedChoiceIndexForAutomationTest(int32 ChoiceCount,
+		int32 RunSeed, int32 NarrativeTurnSerial);
+
 	virtual void SetupInputComponent() override;
 	virtual void PlayerTick(float DeltaTime) override;
+	/** Android 原生触摸兜底：不依赖 UMG 按钮在拖出边界后的释放/移动冒泡。 */
+	virtual bool InputTouch(const FTouchId TouchId, const ETouchType::Type Type,
+		const FVector2D& TouchLocation, const float Force, const uint64 Timestamp) override;
 
 	UFUNCTION()
 	void OnConfirmKey();
@@ -81,6 +128,11 @@ public:
 
 	int32 HoveredCardIndex = INDEX_NONE;
 	float HoveredCardOriginalAngle = 0.f;
+	TWeakObjectPtr<UButton> AnimatedHoverCardButton;
+	TWeakObjectPtr<UWidget> AnimatedHoverCardVisual;
+	int32 AnimatedHoverCardIndex = INDEX_NONE;
+	float HandHoverAnimationAlpha = 0.f;
+	bool bHandHoverTargetVisible = false;
 	void UpdateCardDrag();
 	void EndCardDrag();
 	void ShowAttackLine(int32 EnemyIndex);
@@ -103,6 +155,10 @@ public:
 	bool bDragUsingTouch = false;
 	bool bHasWidgetTouchPosition = false;
 	FVector2D WidgetTouchCanvasPosition = FVector2D::ZeroVector;
+	ETouchIndex::Type ActiveDragTouchIndex = ETouchIndex::Touch1;
+	bool bHasActiveDragTouch = false;
+	ETouchIndex::Type LastTouchEventIndex = ETouchIndex::Touch1;
+	bool bHasLastTouchEvent = false;
 	float CurrentHandCardScale = 1.f;
 	/** 将触摸/鼠标的视口像素坐标稳定换算成动画 Canvas 的局部坐标。 */
 	bool GetPointerCanvasPosition(FVector2D& OutPosition, bool& bOutTouchPressed) const;
@@ -123,23 +179,43 @@ public:
 
 	/** 攻击线弹性动画定时器 */
 	TSharedPtr<FTimerHandle> AttackLineTimerHandle;
+	/** 拖牌攻击线的几何缓存：避免每个鼠标事件重建几十个 Slate 控件。 */
+	int32 AttackLineEnemyIndex = -1;
+	FVector2D AttackLineLastCardPosition = FVector2D::ZeroVector;
+	FVector2D AttackLineLastEnemyPosition = FVector2D::ZeroVector;
+	double AttackLineLastBuildTime = 0.0;
 
 	UPROPERTY()
 	TArray<TWeakObjectPtr<UButton>> HandCardButtons;
 
 	// ---------- 战斗动画 ----------
 	void TriggerCombatAnimations(const FString& ActionType);
-	/** 按卡牌 visual 定义播放投射物、刀光、命中和音效。 */
+	/** 按卡牌 ID/名称与 visual 定义播放独立的攻击时间轴、命中数字和音效。 */
 	void PlayCardVisual(const FCardInstance& Card, int32 TargetEnemyIndex);
-	void SpawnFloatingText(const FString& Text, FLinearColor Color, float X, float Y, float Duration = 1.2f);
-	void SpawnSlashEffect(float X, float Y, FLinearColor Color = FLinearColor(1.f, 1.f, 0.9f, 0.9f));
+	void SpawnFloatingText(const FString& Text, FLinearColor Color, float X, float Y,
+		float Duration = 1.2f, float BaseScale = 1.f, float HorizontalDrift = 0.f);
+	void QueueFloatingText(const FString& Text, FLinearColor Color, const FVector2D& Position,
+		float Delay, float Duration = 1.0f, float BaseScale = 1.f, float HorizontalDrift = 0.f);
+	void SpawnStrikeEffect(const FVector2D& Center, ECombatStrikeStyle Style, FLinearColor Color,
+		float Duration, float Rotation = 0.f, float Strength = 1.f, int32 Variant = 0, float Delay = 0.f);
+	TArray<TPair<int32, int32>> CollectPendingEnemyDamageEvents() const;
 	void SpawnProjectileEffect(const FVector2D& From, const FVector2D& To, FLinearColor Color, float Duration);
 	void SpawnImpactBurst(const FVector2D& Center, FLinearColor Color, float Duration);
 	void SpawnHealBurst(const FVector2D& Center, FLinearColor Color, float Duration);
 	void PlayVisualSound(const FString& SoundId);
+	/** 统一的语义音频入口；缺少新资产时由旧程序化音效继续兜底。 */
+	void PlayAudioEvent(const FString& EventId, float VolumeScale = 1.f,
+		float PitchMin = 0.97f, float PitchMax = 1.03f);
+	void SetMusicForScreen(EGameScreen Screen, EGameScreen PreviousScreen,
+		const FString& MusicStateOverride = TEXT(""));
 	void AnimateScreenShake(float Intensity = 6.f, float Duration = 0.3f);
 	void AnimateColorFlash(FLinearColor Color, float Duration = 0.3f);
 	void ClearAnimations();
+
+	/** Smooth additive shake state. Events add trauma; PlayerTick applies a squared, decaying waveform. */
+	float ScreenShakeTrauma = 0.f;
+	float ScreenShakeDecayRate = 2.5f;
+	float ScreenShakePhase = 0.f;
 
 	// ---------- 牌堆检视与抽卡动画 ----------
 	/** 牌堆内容查看面板（0=关闭 1=抽牌堆 2=弃牌堆） */
@@ -174,9 +250,9 @@ public:
 	UPROPERTY()
 	TArray<UWidget*> ActiveAnimations;
 
-	/** 程序化短音效的 UObject 持有列表，避免播放期间被 GC。 */
+	/** 常驻音频路由器；不随 UMG 页面重建。 */
 	UPROPERTY()
-	TArray<USoundWaveProcedural*> ActiveSoundWaves;
+	UAscendAudioRouter* AudioRouter = nullptr;
 
 	/** 本次卡牌结算是否已有专用表现，避免再叠加旧的通用刀光。 */
 	FString LastPlayedVisualAnimation;
@@ -209,6 +285,15 @@ protected:
 	UBorder* PauseMenuOverlay;
 
 	bool bPauseMenuOpen = false;
+	/** A leave request remains pending until the user confirms a successful save. */
+	bool bLeaveToQuitGame = false;
+	bool bLeaveSaveFailed = false;
+	/** Settings opened from pause return to the same screen and reopen the overlay. */
+	bool bSettingsReturnToPause = false;
+	float SettingsReturnScrollOffset = 0.f;
+	/** Full settings is a root overlay so the underlying screen and async work stay mounted. */
+	UPROPERTY()
+	UOverlay* SettingsOverlayLayer = nullptr;
 
 	EGameScreen CurrentScreen = EGameScreen::Title;
 
@@ -224,7 +309,7 @@ protected:
 	bool bPendingKillLootChoice = false;
 
 	// ---------- 界面构建 ----------
-	void SetScreen(UWidget* Content, EGameScreen Screen);
+	void SetScreen(UWidget* Content, EGameScreen Screen, const FString& MusicStateOverride = TEXT(""));
 	void ShowTitle();
 	void ShowAuthoredLibrary();
 	void ShowMap();
@@ -247,6 +332,10 @@ protected:
 	void ShowPauseMenu();
 	void HidePauseMenu();
 	void TogglePauseMenu();
+	void RequestLeaveConfirmation(bool bQuitGame);
+	void ShowLeaveConfirmation();
+	void CancelLeaveConfirmation();
+	void ConfirmLeaveConfirmation();
 	void SaveAndReturnToTitle();
 	void SaveAndQuitGame();
 
@@ -271,16 +360,43 @@ protected:
 	void FinishCombat();
 	void RestartRun();
 	void RegisterEncounterRuntimeEnemies();
+	/** Invalidates opening wording callbacks when leaving/restarting/loading a run. */
+	void InvalidateInfiniteNarrativeFlow();
 	void StartInfiniteNarrativeRun();
 	void BuildInfiniteOpening();
+	bool RestoreAuthoredOpeningFromRunState();
+	bool RestoreFreeRPForcedJumpResultFromRunState();
+	void RequestAuthoredOpeningChoiceWording();
+	void HandleAuthoredOpeningChoiceWordingReady(bool bSuccess, const TArray<FString>& Texts,
+		const FString& Diagnostic);
+	void InvalidateNarrativeForStoryDirectionChange();
 	FInfiniteNarrativeRequestContext BuildInfiniteNarrativeContext(const FString& FreeformAction = TEXT(""),
-		bool bCombatPrefetch = false, bool bAssumeVictoryWithoutLog = false) const;
-	void RequestNextInfiniteNarrative(const FString& FreeformAction = TEXT(""));
+		bool bCombatPrefetch = false, bool bAssumeVictoryWithoutLog = false,
+		EInfiniteNarrativeRequestKind RequestKind = EInfiniteNarrativeRequestKind::Normal,
+		const FString& ForcedDirection = TEXT("")) const;
+	void RequestNextInfiniteNarrative(const FString& FreeformAction = TEXT(""),
+		EInfiniteNarrativeRequestKind RequestKind = EInfiniteNarrativeRequestKind::Normal,
+		const FString& ForcedDirection = TEXT(""));
 	void HandleInfiniteNarrativeReady(bool bFromLLM, const FInfiniteNarrativeBeat& Beat);
 	void HandleInfiniteNarrativeStreamUpdate(const FInfiniteNarrativeStreamUpdate& Update,
 		bool bCombatPrefetch);
 	void ResetInfiniteNarrativeStreamPreview();
+	/** Resolve the viewport in Slate's local logical space (DPI-safe) for RP layout. */
+	FVector2D GetInfiniteNarrativeLocalViewportSize() const;
+	/** Return the centered 16:10 reading frame size in the same DPI-safe space. */
+	FVector2D GetInfiniteNarrativeFrameSize() const;
+	/** Build the shared fixed-size, centered RP reading frame used by loading/error/stream/final. */
+	UWidget* MakeInfiniteNarrativeScreenFrame(float SafeWidth, float SafeHeight,
+		UScrollBox*& OutScroll, UVerticalBox*& OutContent) const;
+	/** Finish an already-streamed RP page in place; never swaps the glyph tree for wrapped text. */
+	void FinalizeInfiniteNarrativeStream();
 	void RenderInfiniteNarrativeStreamPreview(const FInfiniteNarrativeStreamUpdate& Update);
+	/** Incremental, append-only glyph reveal for RP streaming.  Existing glyphs keep
+	 * their fixed line slot; this never rebuilds the active scene widget tree. */
+	void TickInfiniteNarrativeStreamReveal();
+	/** Update opening choices in place after their optional wording request; keeps
+	 * the already-rendered scene and portraits alive. */
+	void RefreshOpeningChoiceWordingUI();
 	void ResetCombatNarrativePrefetch();
 	void StartCombatNarrativePrefetch(bool bIncludeCombatLog);
 	void HandleCombatNarrativePrefetchReady(bool bFromLLM, const FInfiniteNarrativeBeat& Beat);
@@ -295,7 +411,11 @@ protected:
 	void ShowInfinitePaidDeckRemoval();
 	void ContinueAfterReward();
 	void LoadInfiniteNarrativeSettings();
+	/** Copy the currently visible settings controls into a draft. With bCommitExternalImports=false
+	 * this is UI-only capture: it never writes config, imports files, or changes active generation. */
+	void ApplySettingsWidgetsTo(FInfiniteNarrativeSettings& Target, bool bCommitExternalImports);
 	void SaveInfiniteNarrativeSettings();
+	void CancelSettingsDraft();
 	void ResetSettingsWidgetRefs();
 	void ReturnFromSettings();
 
@@ -311,6 +431,10 @@ protected:
 	UPROPERTY()
 	TArray<UClickProxy*> PendingScreenProxies;
 
+	/** Settings controls live outside ScreenHost and must not be stolen by SetScreen. */
+	UPROPERTY()
+	TArray<UClickProxy*> SettingsProxies;
+
 	/** Controls outside ScreenHost (the permanent menu button) must survive screen replacement. */
 	UPROPERTY()
 	TArray<UClickProxy*> PersistentProxies;
@@ -323,6 +447,7 @@ protected:
 	TArray<FString> CombatLogLines;
 
 	int32 LastProcessedLogIndex = 0;
+	int32 LastProcessedEnemyDamageEventIndex = 0;
 
 	bool bLogExpanded = false;
 
@@ -340,6 +465,14 @@ protected:
 	UInfiniteNarrativeService* InfiniteNarrativeService;
 
 	FInfiniteNarrativeSettings InfiniteNarrativeSettings;
+	/** Import paths are one-shot UI inputs and are deliberately never written to INI. */
+	FString PendingWorldBookImportPath;
+	FString PendingCharacterCardImportPath;
+	/** Chosen once for a new run; the writer turns it into concrete people and the first scene. */
+	FString PendingInfiniteOpeningSeed;
+	FString PendingInfiniteOpeningId;
+	uint64 InfiniteNarrativeFlowSerial = 0;
+	uint64 OpeningWordingRequestSerial = 0;
 	FInfiniteNarrativeBeat CurrentInfiniteBeat;
 	FInfiniteNarrativeChoice PendingInfiniteChoice;
 	FNodeEncounter PendingInfiniteEncounter;
@@ -349,6 +482,14 @@ protected:
 	TArray<FString> PendingNarrativeLostRelics;
 	TArray<FString> PendingNarrativeVariableReceipts;
 	bool bInfiniteNarrativeRequestInFlight = false;
+	/** A cancelled/stale ordinary turn may be retried explicitly; never re-enable its old choices. */
+	bool bInfiniteNarrativeNeedsRefresh = false;
+	FString PendingInfiniteFreeformAction;
+	bool bPendingInfiniteFreeformActionRecorded = false;
+	EInfiniteNarrativeRequestKind ActiveInfiniteNarrativeRequestKind = EInfiniteNarrativeRequestKind::Normal;
+	bool bInfiniteFreeRPForcedTurnActive = false;
+	/** The fixed opening body is visible while this one-shot copy request is pending. */
+	bool bOpeningChoiceWordingPending = false;
 	bool bInfiniteChoiceResolved = false;
 	bool bInfiniteFunctionFlowActive = false;
 	bool bInfiniteCardOperationUpgrade = false;
@@ -357,6 +498,8 @@ protected:
 	FInfiniteGameOperation ActiveInfiniteGameOperation;
 	bool bCombatNarrativePrefetchReady = false;
 	bool bCombatNarrativePrefetchFailed = false;
+	/** A stale/failed prefetch that was blocking reward transition has a visible retry path. */
+	bool bCombatNarrativePrefetchNeedsRetry = false;
 	bool bDiscardCombatNarrativePrefetch = false;
 	bool bWaitingForCombatNarrativeAfterReward = false;
 	bool bCombatPrefetchIncludedLog = false;
@@ -364,6 +507,12 @@ protected:
 	FInfiniteNarrativeBeat CombatNarrativePrefetchedBeat;
 	FInfiniteNarrativeStreamUpdate CombatNarrativePrefetchStreamUpdate;
 	bool bHasCombatNarrativePrefetchStreamUpdate = false;
+	/** Non-secret story-direction fingerprint captured when the prefetch starts. */
+	FString CombatNarrativePrefetchStoryDirectionCacheKey;
+	bool bCombatNarrativePrefetchRequestInFlight = false;
+	FInfiniteNarrativeSettings SettingsDraft;
+	FInfiniteNarrativeSettings SettingsDraftBaseline;
+	bool bSettingsDraftActive = false;
 	int32 SettingsCategory = 3;
 	EGameScreen SettingsReturnScreen = EGameScreen::Title;
 
@@ -386,15 +535,63 @@ protected:
 	UVerticalBox* RPStreamingDialogueBox;
 
 	UPROPERTY()
-	UTextBlock* RPStreamingTitleText;
-
-	UPROPERTY()
 	UTextBlock* RPStreamingNarrationText;
 
 	UPROPERTY()
-	TArray<UTextBlock*> RPStreamingDialogueTexts;
+	UVerticalBox* RPStreamingNarrationGlyphBox;
+
+	UPROPERTY()
+	TArray<UVerticalBox*> RPStreamingDialogueGlyphBoxes;
+
+	/** One retained row per dialogue slot; metadata changes replace only that row. */
+	UPROPERTY()
+	TArray<UWidget*> RPStreamingDialogueRows;
+
+	/** Bubble content size boxes receive the measured glyph row height on each append. */
+	UPROPERTY()
+	TArray<USizeBox*> RPStreamingDialogueBubbleSizes;
+
+	/** One width per dialogue row, shared by glyph wrapping and its actual BodyBox. */
+	UPROPERTY()
+	TArray<float> RPStreamingDialogueTextWidths;
+
+	/** Portrait widgets retained for development geometry audits; one slot per dialogue line. */
+	UPROPERTY()
+	TArray<UWidget*> RPStreamingPortraitWidgets;
+
+	UPROPERTY()
+	TArray<UTextBlock*> RPStreamingRevealGlyphs;
+
+	UPROPERTY()
+	TArray<UButton*> RPInfiniteChoiceButtons;
+
+	UPROPERTY()
+	TArray<UTextBlock*> RPOpeningChoiceLabels;
+
+	UPROPERTY()
+	UTextBlock* RPOpeningChoicePendingText;
 
 	TArray<FString> RPStreamingDialogueKeys;
+	TArray<double> RPStreamingRevealStartTimes;
+	TArray<FString> RPStreamingDialogueSources;
+	TArray<UHorizontalBox*> RPStreamingNarrationLines;
+	TArray<float> RPStreamingNarrationLineWidths;
+	TArray<TArray<UHorizontalBox*>> RPStreamingDialogueLines;
+	TArray<TArray<float>> RPStreamingDialogueLineWidths;
+	FString RPStreamingNarrationSource;
+	TArray<bool> RPStreamingDialogueNeedsIndent;
+	TArray<bool> RPStreamingDialoguePreviousNewline;
+	bool bRPStreamingNarrationNeedsIndent = true;
+	bool bRPStreamingNarrationPreviousNewline = false;
+	bool bRPStreamingSceneFinalized = false;
+	float RPStreamingTextWidth = 720.f;
+	float RPStreamingPortraitSize = 208.f;
+	float RPStreamingFrameHeight = 640.f;
+	/** Development-only timestamp for proving the final glyph alpha has settled. */
+	double RPStreamingRevealCompletedAt = 0.0;
+	/** Development-only fixture suffix used by RPVisualTest geometry audits. */
+	FString RPVisualExpectedTail;
+	FTimerHandle RPStreamingRevealTimer;
 
 	UPROPERTY()
 	UEditableTextBox* SettingsEndpointInput;
@@ -445,6 +642,12 @@ protected:
 	UComboBoxString* SettingsMvuReasoningEffortCombo;
 
 	UPROPERTY()
+	USlider* SettingsCardForgeReasoningSlider;
+
+	UPROPERTY()
+	UTextBlock* SettingsCardForgeReasoningValueText;
+
+	UPROPERTY()
 	UCheckBox* SettingsStreamResponseCheckBox;
 
 	UPROPERTY()
@@ -454,10 +657,40 @@ protected:
 	UCheckBox* SettingsRequestMvuReasoningCheckBox;
 
 	UPROPERTY()
+	UCheckBox* SettingsTemporaryReasoningCheckBox;
+
+	UPROPERTY()
+	UCheckBox* SettingsReasoningPrefillCheckBox;
+
+	UPROPERTY()
+	UMultiLineEditableTextBox* SettingsReasoningPrefillInput;
+
+	UPROPERTY()
+	UCheckBox* SettingsMaintenanceMarkerCheckBox;
+
+	UPROPERTY()
+	UEditableTextBox* SettingsMaintenanceMarkerInput;
+
+	UPROPERTY()
 	UEditableTextBox* SettingsTimeoutInput;
 
 	UPROPERTY()
 	UEditableTextBox* SettingsSfxVolumeInput;
+
+	UPROPERTY()
+	UEditableTextBox* SettingsMusicVolumeInput;
+
+	UPROPERTY()
+	USlider* SettingsSfxVolumeSlider;
+
+	UPROPERTY()
+	USlider* SettingsMusicVolumeSlider;
+
+	UPROPERTY()
+	UTextBlock* SettingsSfxVolumeValueText;
+
+	UPROPERTY()
+	UTextBlock* SettingsMusicVolumeValueText;
 
 	UPROPERTY()
 	UEditableTextBox* SettingsInputContextInput;
@@ -517,6 +750,45 @@ protected:
 	UMultiLineEditableTextBox* SettingsAuthorNoteInput;
 
 	UPROPERTY()
+	UMultiLineEditableTextBox* SettingsStoryDirectionInput;
+
+	UPROPERTY()
+	UCheckBox* SettingsStoryDirectionCheckBox;
+
+	UPROPERTY()
+	UCheckBox* SettingsAllowImportedContentCheckBox;
+
+	UPROPERTY()
+	UComboBoxString* SettingsWorldBookCombo;
+
+	UPROPERTY()
+	UEditableTextBox* SettingsWorldBookImportPathInput;
+
+	UPROPERTY()
+	UCheckBox* SettingsWorldBookEnabledCheckBox;
+
+	UPROPERTY()
+	UTextBlock* SettingsWorldBookStatusText;
+
+	UPROPERTY()
+	UComboBoxString* SettingsCharacterCardCombo;
+
+	UPROPERTY()
+	UEditableTextBox* SettingsCharacterCardImportPathInput;
+
+	UPROPERTY()
+	UCheckBox* SettingsCharacterCardEnabledCheckBox;
+
+	UPROPERTY()
+	UCheckBox* SettingsEmbeddedCharacterBookCheckBox;
+
+	UPROPERTY()
+	UTextBlock* SettingsCharacterCardStatusText;
+
+	UPROPERTY()
+	UMultiLineEditableTextBox* SettingsPromptPreviewInput;
+
+	UPROPERTY()
 	UMultiLineEditableTextBox* SettingsCustomWorldBookInput;
 
 	UPROPERTY()
@@ -553,6 +825,9 @@ protected:
 	UCheckBox* SettingsScreenShakeCheckBox;
 
 	UPROPERTY()
+	UCheckBox* SettingsReduceFlashingCheckBox;
+
+	UPROPERTY()
 	UComboBoxString* SettingsCombatGenerationTimingCombo;
 
 	UPROPERTY()
@@ -562,6 +837,15 @@ protected:
 	UCheckBox* SettingsContinuityCheckBox;
 
 private:
+	UFUNCTION()
+	void OnCardForgeReasoningChanged(float Value);
+
+	UFUNCTION()
+	void OnSfxVolumeChanged(float Value);
+
+	UFUNCTION()
+	void OnMusicVolumeChanged(float Value);
+
 	UFUNCTION()
 	void OnCombatLogDynamic(const FString& Msg);
 };

@@ -103,6 +103,80 @@
       "gameplay_role": "跨章节对手、终章Boss与三种结局的价值辩手"
     },
     {
+      "id": "opening_a_yao",
+      "name": "阿杳",
+      "aliases": ["阿杳"],
+      "color": "#6B7780",
+      "art": "Art/avatar/opening_yao_v1.png",
+      "expressions": {
+        "neutral": "Art/avatar/opening_yao_v1.png",
+        "worried": "Art/avatar/opening_yao_v1.png"
+      },
+      "role": "青禾渡农家中明确十二岁的家人，替人采藕换药钱；她是开场中的家人，不是恋爱角色。",
+      "knowledge_boundary": "只知道青禾渡家中债务、父亲病情与母亲留下的灵石，不知道修仙宗门或后续战斗真相。",
+      "speech_style": "短句、克制，担心家人却不直接讨要承诺。",
+      "gameplay_role": "青禾渡有限开场的固定家人角色"
+    },
+    {
+      "id": "opening_sang_wan",
+      "name": "桑晚",
+      "aliases": ["桑晚"],
+      "color": "#71816C",
+      "art": "Art/avatar/opening_sangwan_v1.png",
+      "expressions": {
+        "neutral": "Art/avatar/opening_sangwan_v1.png",
+        "determined": "Art/avatar/opening_sangwan_v1.png"
+      },
+      "role": "栖鹤观旧药圃的杂灵根少女，被判不收却愿以劳作换取留下。",
+      "knowledge_boundary": "知道栖鹤观旧药圃、身契和自己的杂灵根处境，不知道尸傀来源与宗门更深层秘密。",
+      "speech_style": "直接务实，先谈能做的活与承担的代价，不把善意说成恩情。",
+      "gameplay_role": "栖鹤观有限开场的固定同行者"
+    },
+    {
+      "id": "opening_lu_qinghe",
+      "name": "陆青禾",
+      "aliases": ["陆青禾"],
+      "color": "#597267",
+      "art": "Art/avatar/opening_luqinghe_v1.png",
+      "expressions": {
+        "neutral": "Art/avatar/opening_luqinghe_v1.png",
+        "worried": "Art/avatar/opening_luqinghe_v1.png"
+      },
+      "role": "临溪陆氏旁支族姐，守着病逝父亲留下的采药路线与母女最后的活路。",
+      "knowledge_boundary": "知道陆氏祠堂、东院灵脉、祖屋木匣和父亲最后一夜的经历，不知道木匣旧灵息会引来的敌人。",
+      "speech_style": "礼克制而恳切，先请求听完事实，再谈选择与信任。",
+      "gameplay_role": "临溪陆氏有限开场的固定族人角色"
+    },
+    {
+      "id": "opening_wen_yanhui",
+      "name": "闻雁回",
+      "aliases": ["闻雁回"],
+      "color": "#53647A",
+      "art": "Art/avatar/opening_wenyanhui_v1.png",
+      "expressions": {
+        "neutral": "Art/avatar/opening_wenyanhui_v1.png"
+      },
+      "role": "玄微门外院负责巡夜的年轻弟子，带着寒髓砂处理丹房主炉裂纹。",
+      "knowledge_boundary": "知道丹房、炉册和寒髓砂的即时处境，不知道焚账符修的完整计划。",
+      "speech_style": "简洁、算清代价，提出可执行的交换而不许诺额外照应。",
+      "gameplay_role": "玄微门有限开场的固定协作者"
+    },
+    {
+      "id": "opening_blind_grandmother",
+      "name": "瞎婆婆",
+      "aliases": ["瞎婆婆"],
+      "color": "#6E6470",
+      "art": "Art/avatar/opening_blind_grandmother_v1.png",
+      "expressions": {
+        "neutral": "Art/avatar/opening_blind_grandmother_v1.png",
+        "stern": "Art/avatar/opening_blind_grandmother_v1.png"
+      },
+      "role": "白石坊修伞摊的真实长者，以竹杖和听觉辨认来客，提醒玩家莫信眼前人。",
+      "knowledge_boundary": "知道白石坊、父亲留下的暗号与段九的债契，不知道黑木匣旧物的全部来历。",
+      "speech_style": "话少而尖利，常用期限、假话和代价拆穿表面说辞。",
+      "gameplay_role": "白石坊有限开场的固定旁观者与提醒者"
+    },
+    {
       "id": "unknown_woman",
       "name": "陌生女子",
       "aliases": [],

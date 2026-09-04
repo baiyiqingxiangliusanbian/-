@@ -116,8 +116,8 @@
     "optional": ["class", "flavor", "art", "retain", "exhaust", "counter_condition", "upgrade", "visual"],
     "counter_conditions": ["on_basic_play", "on_basic_gongfa_play", "on_any_card_play", "on_same_type_play", "on_sword_play", "on_spell_play", "on_damage_dealt", "on_draw", "on_turn_start"],
     "visual": {
-      "animation": ["none", "slash", "fireball", "impact", "block", "heal", "draw"],
-      "sound": ["none", "sword_slash", "fireball", "block", "heal", "draw"],
+      "animation": ["none", "slash", "greatsword", "myriad_swords", "sword_wave", "thunder", "flame_burst", "poison", "ward", "spirit_flow", "power_aura", "talisman", "seal", "curse_burst", "fireball", "impact", "block", "heal", "draw"],
+      "sound": ["none", "sword_slash", "sword_heavy", "sword_flurry", "sword_wave", "thunder_crack", "fire_burst", "poison_hiss", "ward_raise", "spirit_chime", "power_surge", "talisman_cast", "seal_stamp", "curse_whisper", "impact_hit", "heal_chime", "fireball", "block", "heal", "draw"],
       "accent": "hex color, for example #FF7A28",
       "duration": "seconds",
       "intensity": "screen shake strength; 0 disables shake",

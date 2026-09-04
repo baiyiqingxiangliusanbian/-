@@ -28,6 +28,71 @@ struct FEnemyCombatant
 	int32 LevelBonus = 0;
 };
 
+
+/**
+ * Structured enemy hit record for presentation and telemetry.
+ */
+USTRUCT(BlueprintType)
+struct FEnemyDamageEvent
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly)
+    int32 EnemyIndex = INDEX_NONE;
+
+    UPROPERTY(BlueprintReadOnly)
+    int32 Damage = 0;
+};
+
+/**
+ * Authoritative per-encounter difficulty result.  The profile is generated
+ * once by the engine and can be persisted by URunManager before an encounter
+ * starts.  HPScale, IntentScale and ThreatScore are all strictly greater than
+ * the previous profile, even when a low-HP template follows an elite/Boss.
+ */
+USTRUCT(BlueprintType)
+struct FCombatDifficultyProfile
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly)
+	int32 BattleSerial = 0;
+
+	UPROPERTY(BlueprintReadOnly)
+	FString Tier = TEXT("normal");
+
+	UPROPERTY(BlueprintReadOnly)
+	int32 DifficultyStep = 0;
+
+	UPROPERTY(BlueprintReadOnly)
+	bool bElite = false;
+
+	UPROPERTY(BlueprintReadOnly)
+	bool bBoss = false;
+
+	UPROPERTY(BlueprintReadOnly)
+	float HPScale = 1.f;
+
+	UPROPERTY(BlueprintReadOnly)
+	float IntentScale = 1.f;
+
+	UPROPERTY(BlueprintReadOnly)
+	float ThreatScore = 0.f;
+
+	/** Template-only score retained for diagnostics; not a progression floor. */
+	UPROPERTY(BlueprintReadOnly)
+	float TemplateThreat = 0.f;
+
+	UPROPERTY(BlueprintReadOnly)
+	float PreviousHPScale = 0.f;
+
+	UPROPERTY(BlueprintReadOnly)
+	float PreviousIntentScale = 0.f;
+
+	UPROPERTY(BlueprintReadOnly)
+	float PreviousThreatScore = 0.f;
+};
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCombatLog, const FString&, Message);
 
 /**
@@ -86,6 +151,13 @@ public:
 	UPROPERTY(BlueprintReadOnly)
 	TArray<FEnemyCombatant> Enemies;
 
+	/** Difficulty actually used to instantiate this combat. */
+	UPROPERTY(BlueprintReadOnly)
+	FCombatDifficultyProfile DifficultyProfile;
+
+	/** Ordered hit records for the current combat. Reset by StartCombat. */
+	TArray<FEnemyDamageEvent> EnemyDamageEvents;
+
 	UPROPERTY(BlueprintReadOnly)
 	int32 TurnCount = 0;
 
@@ -107,12 +179,30 @@ public:
 	/** 开始战斗。
 	 * Deck: 卡组（含升级标记）; EnemyIds: 敌人ID列表; OwnedRelicIds: 持有法宝
 	 * PlayerMaxHP: 最大气血; PlayerCurrentHP: 当前气血(-1=满血); EnemyHPBonus: 敌人HP加成(魔道因果)
-	 * EnemyLevel: 敌人强化等级(0=普通 1=凶 2=厉 3=煞); Seed: 随机种子
+	 * EnemyLevel: 敌人强化等级(0=普通 1=凶 2=厉 3=煞); Seed: 随机种子。
+	 * BattleSerial/Previous* 为可选的权威递增难度输入；省略时保留旧
+	 * 调用行为，使用 StartCombatWithDifficulty 可显式启用统一曲线。
 	 */
 	UFUNCTION(BlueprintCallable)
 	bool StartCombat(const TArray<FDeckCard>& Deck, const TArray<FString>& EnemyIds,
 		const TArray<FString>& OwnedRelicIds, int32 PlayerMaxHP, int32 PlayerCurrentHP,
-		int32 EnemyHPBonus, int32 Seed, int32 EnemyLevel = 0);
+		int32 EnemyHPBonus, int32 Seed, int32 EnemyLevel = 0,
+		int32 BattleSerial = 0, float PreviousBattleThreatScore = 0.f,
+		float PreviousBattleHPScale = 0.f, float PreviousBattleIntentScale = 0.f,
+		bool bEliteEncounter = false, bool bBossEncounter = false);
+
+	/** StartCombat variant that consumes a profile previously produced by the manager. */
+	bool StartCombatWithDifficulty(const TArray<FDeckCard>& Deck, const TArray<FString>& EnemyIds,
+		const TArray<FString>& OwnedRelicIds, int32 PlayerMaxHP, int32 PlayerCurrentHP,
+		int32 EnemyHPBonus, int32 Seed, const FCombatDifficultyProfile& Difficulty);
+
+	/** Build the only supported combat difficulty curve. */
+	static float ComputeTemplateThreat(const TArray<FEnemyData>& EnemyTemplates);
+	static FCombatDifficultyProfile BuildDifficultyProfile(int32 BattleSerial,
+		float PreviousThreatScore, float PreviousHPScale, float PreviousIntentScale,
+		const TArray<FEnemyData>& EnemyTemplates, bool bElite, bool bBoss);
+	static bool ValidateDifficultyProgression(const FCombatDifficultyProfile& Previous,
+		const FCombatDifficultyProfile& Current, FString& OutError);
 
 	/** 注册本局运行时生成的敌人数据。StartCombat 会在加载静态 JSON 后合并这些覆盖项。 */
 	void RegisterRuntimeEnemies(const TArray<FEnemyData>& RuntimeEnemies);
@@ -162,7 +252,8 @@ public:
 	bool HasPower(const FString& PowerId) const { return ActivePowerIds.Contains(PowerId); }
 	/** 返回同一功法当前已运转的独立实例数量；同名功法不会互相覆盖。 */
 	int32 GetPowerCount(const FString& PowerId) const;
-	int32 GetOneSwordDamage() const { return 9 + OneSwordEnhance * 6; }
+	/** Current One Sword base damage before the ordinary per-hit Strength/status rules. */
+	int32 GetOneSwordDamage() const { return 8 + OneSwordEnhance * 3; }
 	int32 GetOneSwordEnhance() const { return OneSwordEnhance; }
 
 	/** 解析 JSON 效果的动态数值，供战斗结算和卡面变量共用。 */
@@ -184,6 +275,10 @@ private:
 	TArray<FEnemyData> RuntimeEnemyOverrides;
 	TArray<FCardData> RuntimeCardOverrides;
 	TArray<FRelicData> RuntimeRelicOverrides;
+
+	/** Temporary profile supplied by StartCombatWithDifficulty. */
+	FCombatDifficultyProfile PendingDifficultyProfile;
+	bool bHasPendingDifficultyProfile = false;
 
 	TArray<FRelicData> ActiveRelics;
 	TArray<FRelicRuntimeState> RelicCounters;
@@ -219,7 +314,7 @@ private:
 	FString PendingPowerSourceName;
 
 	// ---- 一剑系统 ----
-	/** 【一剑】累计强化伤害层数（每层+6伤害） */
+	/** 【一剑】累计强化层数（当前卡牌契约为每层+3基础伤害） */
 	int32 OneSwordEnhance = 0;
 
 	/** 本回合一剑是否已触发额外一次（剑意共鸣） */

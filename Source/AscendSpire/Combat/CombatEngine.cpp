@@ -21,6 +21,143 @@ void UCombatEngine::Log(const FString& Msg) const
 	OnLog.Broadcast(Msg);
 }
 
+float UCombatEngine::ComputeTemplateThreat(const TArray<FEnemyData>& EnemyTemplates)
+{
+	if (EnemyTemplates.Num() == 0) return 1.f;
+
+	float Score = 0.f;
+	for (const FEnemyData& Enemy : EnemyTemplates)
+	{
+		// HP contributes sub-linearly so a single high-HP template does not make
+		// every later encounter irrelevant to card quality.
+		const float HPPart = FMath::Sqrt(static_cast<float>(FMath::Clamp(Enemy.MaxHP, 1, 100000)) / 18.f);
+		float IntentPart = 0.f;
+		for (const FEnemyIntent& Intent : Enemy.Intents)
+		{
+			const float Repetitions = FMath::Max(1, Intent.Times);
+			const float Value = static_cast<float>(FMath::Max(0, Intent.Value)) * Repetitions;
+			if (Intent.Action == TEXT("attack") || Intent.Action == TEXT("attack_multi"))
+				IntentPart += Value / 8.f;
+			else if (Intent.Action == TEXT("defend"))
+				IntentPart += Value / 12.f;
+			else
+				IntentPart += (Value + Intent.StatusStacks * 1.5f) / 16.f;
+		}
+
+		float AbilityPart = 0.f;
+		for (const FString& RawAbility : Enemy.Abilities)
+		{
+			FString AbilityId;
+			FString RawValue;
+			if (!RawAbility.Split(TEXT(":"), &AbilityId, &RawValue)) AbilityId = RawAbility;
+			const int32 Value = RawValue.IsEmpty() ? 1 : FMath::Clamp(FCString::Atoi(*RawValue), 1, 100);
+			if (AbilityId == TEXT("first_strike")) AbilityPart += 3.0f;
+			else if (AbilityId == TEXT("thorns")) AbilityPart += Value * 0.60f;
+			else if (AbilityId == TEXT("enrage_half")) AbilityPart += Value * 0.75f;
+			else if (AbilityId == TEXT("regen")) AbilityPart += Value * 0.65f;
+			else if (AbilityId == TEXT("block_aura")) AbilityPart += Value * 0.35f;
+			else if (AbilityId == TEXT("poison_aura")) AbilityPart += Value * 0.85f;
+			else if (AbilityId == TEXT("start_weak") || AbilityId == TEXT("start_vulnerable")) AbilityPart += Value * 0.55f;
+			else if (AbilityId == TEXT("hand_limit")) AbilityPart += Value * 1.75f;
+			else if (AbilityId == TEXT("nightmare")) AbilityPart += 3.5f;
+			else if (AbilityId == TEXT("curse_ritual")) AbilityPart += Value * 1.5f;
+			else if (AbilityId == TEXT("drain")) AbilityPart += Value * 0.65f;
+			else if (AbilityId == TEXT("summon")) AbilityPart += 3.0f;
+			else if (!AbilityId.IsEmpty()) AbilityPart += 0.5f;
+		}
+
+		if (Enemy.Tier == TEXT("elite")) AbilityPart += 3.0f;
+		else if (Enemy.Tier == TEXT("boss")) AbilityPart += 8.0f;
+		Score += 1.f + HPPart + IntentPart + AbilityPart;
+	}
+	return FMath::Max(1.f, Score);
+}
+
+FCombatDifficultyProfile UCombatEngine::BuildDifficultyProfile(int32 BattleSerial,
+	float PreviousThreatScore, float PreviousHPScale, float PreviousIntentScale,
+	const TArray<FEnemyData>& EnemyTemplates, bool bElite, bool bBoss)
+{
+	FCombatDifficultyProfile Profile;
+	Profile.BattleSerial = FMath::Max(1, BattleSerial);
+	Profile.bElite = bElite;
+	Profile.bBoss = bBoss;
+	Profile.Tier = bBoss ? TEXT("boss") : (bElite ? TEXT("elite") : TEXT("normal"));
+	Profile.PreviousThreatScore = FMath::Max(0.f, PreviousThreatScore);
+	Profile.PreviousHPScale = FMath::Max(0.f, PreviousHPScale);
+	Profile.PreviousIntentScale = FMath::Max(0.f, PreviousIntentScale);
+	Profile.TemplateThreat = ComputeTemplateThreat(EnemyTemplates);
+
+	// A gentle continuous slope plus discrete every-third-battle steps keeps
+	// long infinite runs moving without making early card rewards obsolete.
+	const int32 SerialOffset = Profile.BattleSerial - 1;
+	const int32 SerialStep = SerialOffset / 3;
+	const float ContinuousPressure = 1.f + SerialOffset * 0.065f;
+	const float TemplateBias = FMath::Clamp(Profile.TemplateThreat / 12.f, 0.72f, 1.55f) - 1.f;
+	const float TierStep = bBoss ? 0.58f : (bElite ? 0.23f : 0.f);
+
+	const float CandidateHP = 0.93f + ContinuousPressure * 0.085f
+		+ TemplateBias * 0.035f + TierStep;
+	const float CandidateIntent = 0.94f + ContinuousPressure * 0.052f
+		+ TemplateBias * 0.022f + TierStep * 0.60f;
+	const float CandidateThreat = Profile.TemplateThreat * ContinuousPressure
+		+ static_cast<float>(SerialStep) * 1.50f + TierStep * 8.f;
+
+	// These floors are the important invariant.  They deliberately use a
+	// visible epsilon rather than a post-hoc score-only correction, ensuring
+	// actual HP and intent output cannot retreat after an elite or Boss step.
+	Profile.HPScale = FMath::Max(CandidateHP,
+		Profile.PreviousHPScale > 0.f ? Profile.PreviousHPScale * 1.08f : 0.f);
+	Profile.IntentScale = FMath::Max(CandidateIntent,
+		Profile.PreviousIntentScale > 0.f ? Profile.PreviousIntentScale * 1.05f : 0.f);
+	Profile.ThreatScore = FMath::Max(CandidateThreat,
+		Profile.PreviousThreatScore > 0.f ? Profile.PreviousThreatScore * 1.08f : 0.01f);
+	Profile.DifficultyStep = SerialStep + (bBoss ? 2 : (bElite ? 1 : 0));
+	return Profile;
+}
+
+bool UCombatEngine::ValidateDifficultyProgression(const FCombatDifficultyProfile& Previous,
+	const FCombatDifficultyProfile& Current, FString& OutError)
+{
+	OutError.Reset();
+	if (Current.BattleSerial <= Previous.BattleSerial)
+	{
+		OutError = TEXT("战斗序号未严格递增");
+		return false;
+	}
+	// A zero-serial profile is the explicit sentinel for the first encounter.
+	// FCombatDifficultyProfile's display defaults (HP/Intent = 1) must not be
+	// mistaken for a previous authoritative combat, otherwise a valid first
+	// profile would be required to start at 1.08x/1.05x before any battle exists.
+	const bool bHasPreviousProfile = Previous.BattleSerial > 0;
+	if (bHasPreviousProfile)
+	{
+		if (!(Current.HPScale > Previous.HPScale)
+			|| (Current.HPScale < Previous.HPScale * 1.08f))
+		{
+			OutError = TEXT("HPScale 未达到每战至少 +8% 的递增");
+			return false;
+		}
+		if (!(Current.IntentScale > Previous.IntentScale)
+			|| (Current.IntentScale < Previous.IntentScale * 1.05f))
+		{
+			OutError = TEXT("IntentScale 未达到每战至少 +5% 的递增");
+			return false;
+		}
+		if (!(Current.ThreatScore > Previous.ThreatScore)
+			|| (Current.ThreatScore < Previous.ThreatScore * 1.08f))
+		{
+			OutError = TEXT("ThreatScore 未达到每战至少 +8% 的递增");
+			return false;
+		}
+	}
+	else if (Current.HPScale <= 0.f || Current.IntentScale <= 0.f || Current.ThreatScore <= 0.f)
+	{
+		OutError = TEXT("首场难度档案含有非正数值");
+		return false;
+	}
+	return true;
+}
+
 bool UCombatEngine::InitData(FString& OutError)
 {
 	TArray<FCardData> Cards;
@@ -76,9 +213,33 @@ FCardInstance UCombatEngine::MakeCard(const FString& CardId) const
 	return Inst;
 }
 
+bool UCombatEngine::StartCombatWithDifficulty(const TArray<FDeckCard>& Deck,
+	const TArray<FString>& EnemyIds, const TArray<FString>& OwnedRelicIds,
+	int32 PlayerMaxHP, int32 PlayerCurrentHP, int32 EnemyHPBonus, int32 Seed,
+	const FCombatDifficultyProfile& Difficulty)
+{
+	if (Difficulty.BattleSerial <= 0 || Difficulty.HPScale <= 0.f
+		|| Difficulty.IntentScale <= 0.f || Difficulty.ThreatScore <= 0.f)
+	{
+		UE_LOG(LogTemp, Error, TEXT("[Combat] 无效的权威难度档案，拒绝开始战斗"));
+		return false;
+	}
+	PendingDifficultyProfile = Difficulty;
+	bHasPendingDifficultyProfile = true;
+	const bool bStarted = StartCombat(Deck, EnemyIds, OwnedRelicIds, PlayerMaxHP,
+		PlayerCurrentHP, EnemyHPBonus, Seed, Difficulty.DifficultyStep,
+		Difficulty.BattleSerial, Difficulty.PreviousThreatScore,
+		Difficulty.PreviousHPScale, Difficulty.PreviousIntentScale,
+		Difficulty.bElite, Difficulty.bBoss);
+	bHasPendingDifficultyProfile = false;
+	return bStarted;
+}
+
 bool UCombatEngine::StartCombat(const TArray<FDeckCard>& Deck, const TArray<FString>& EnemyIds,
 	const TArray<FString>& OwnedRelicIds, int32 PlayerMaxHP, int32 PlayerCurrentHP,
-	int32 EnemyHPBonus, int32 Seed, int32 EnemyLevel)
+	int32 EnemyHPBonus, int32 Seed, int32 EnemyLevel, int32 BattleSerial,
+	float PreviousBattleThreatScore, float PreviousBattleHPScale,
+	float PreviousBattleIntentScale, bool bEliteEncounter, bool bBossEncounter)
 {
 	if (CardTable.Num() == 0)
 	{
@@ -107,8 +268,42 @@ bool UCombatEngine::StartCombat(const TArray<FDeckCard>& Deck, const TArray<FStr
 	RuntimeCardOverrides.Reset();
 	RuntimeRelicOverrides.Reset();
 
+	// Resolve the profile after runtime enemy overrides have been installed so
+	// LLM/procedural templates retain their own mechanics in the threat score.
+	bHasPendingDifficultyProfile = bHasPendingDifficultyProfile
+		&& PendingDifficultyProfile.BattleSerial > 0;
+	if (bHasPendingDifficultyProfile)
+	{
+		DifficultyProfile = PendingDifficultyProfile;
+	}
+	else if (BattleSerial > 0)
+	{
+		TArray<FEnemyData> Templates;
+		bool bResolvedElite = bEliteEncounter;
+		bool bResolvedBoss = bBossEncounter;
+		for (const FString& EnemyId : EnemyIds)
+		{
+			if (const FEnemyData* Found = EnemyTable.Find(EnemyId))
+			{
+				Templates.Add(*Found);
+				bResolvedElite = bResolvedElite || Found->Tier == TEXT("elite");
+				bResolvedBoss = bResolvedBoss || Found->Tier == TEXT("boss");
+			}
+		}
+		DifficultyProfile = BuildDifficultyProfile(BattleSerial,
+			PreviousBattleThreatScore, PreviousBattleHPScale,
+			PreviousBattleIntentScale, Templates, bResolvedElite, bResolvedBoss);
+	}
+	else
+	{
+		// Legacy/test callers intentionally retain the pre-curve behavior.  The
+		// zero serial is also an explicit signal that no persistent profile exists.
+		DifficultyProfile = FCombatDifficultyProfile();
+	}
+
 	Rng.Initialize(Seed);
 	NextCardUID = 1;
+	EnemyDamageEvents.Reset();
 
 	// 玩家
 	Player = FCombatantState();
@@ -131,6 +326,11 @@ bool UCombatEngine::StartCombat(const TArray<FDeckCard>& Deck, const TArray<FStr
 	ActivePowerNames.Reset();
 	PendingDiscoverChoices.Reset();
 	CounterDamage = 0;
+	// One Sword's enhancement is combat-local.  Combat controllers normally
+	// create a fresh engine per encounter, but StartCombat is also a public
+	// reuse path (and commandlets do reuse engines); never carry prior combat
+	// enhancement into a new settlement.
+	OneSwordEnhance = 0;
 
 	// 卡组
 	DrawPile.Reset();
@@ -171,10 +371,29 @@ bool UCombatEngine::StartCombat(const TArray<FDeckCard>& Deck, const TArray<FStr
 		static const TCHAR* LevelPrefix[] = {TEXT(""), TEXT("凶·"), TEXT("厉·"), TEXT("煞·")};
 		E.State.Name = FString(LevelPrefix[E.LevelBonus]) + Found->Name;
 
-		// 敌人缩放: Level 0=×1.0 1=×1.7 2=×2.6 3=×4.0
-		static const float LevelMult[] = {1.0f, 1.7f, 2.6f, 4.0f};
-		const int32 LvlClamped = FMath::Clamp(E.LevelBonus, 0, 3);
-		E.State.MaxHP = FMath::RoundToInt((Found->MaxHP + EnemyHPBonus) * LevelMult[LvlClamped]);
+		if (DifficultyProfile.BattleSerial > 0)
+		{
+			// The profile is the sole numerical authority for new encounters.  The
+			// old EnemyLevel remains available for display/compatibility, but no
+			// second multiplicative curve is applied here.
+			E.State.MaxHP = FMath::Clamp(FMath::RoundToInt(
+				(Found->MaxHP + EnemyHPBonus) * DifficultyProfile.HPScale), 1, 100000);
+			for (FEnemyIntent& Intent : E.Data.Intents)
+			{
+				if (Intent.Value > 0)
+					Intent.Value = FMath::Clamp(FMath::RoundToInt(Intent.Value * DifficultyProfile.IntentScale), 1, 10000);
+				if (Intent.StatusStacks > 0)
+					Intent.StatusStacks = FMath::Clamp(FMath::RoundToInt(
+						Intent.StatusStacks * FMath::Sqrt(DifficultyProfile.IntentScale)), 1, 1000);
+			}
+		}
+		else
+		{
+			// Legacy callers: Level 0=×1.0 1=×1.7 2=×2.6 3=×4.0.
+			static const float LevelMult[] = {1.0f, 1.7f, 2.6f, 4.0f};
+			const int32 LvlClamped = FMath::Clamp(E.LevelBonus, 0, 3);
+			E.State.MaxHP = FMath::RoundToInt((Found->MaxHP + EnemyHPBonus) * LevelMult[LvlClamped]);
+		}
 		E.State.HP = E.State.MaxHP;
 		Enemies.Add(E);
 	}
@@ -207,6 +426,13 @@ bool UCombatEngine::StartCombat(const TArray<FDeckCard>& Deck, const TArray<FStr
 		Log(FString::Printf(TEXT("手牌上限减少 %d"), HandLimitReduction));
 
 	Log(TEXT("====== 战斗开始 ======"));
+	if (DifficultyProfile.BattleSerial > 0)
+	{
+		Log(FString::Printf(TEXT("难度序号 #%d | %s台阶%d | HP×%.3f | 意图×%.3f | 威胁 %.2f"),
+			DifficultyProfile.BattleSerial, *DifficultyProfile.Tier,
+			DifficultyProfile.DifficultyStep, DifficultyProfile.HPScale,
+			DifficultyProfile.IntentScale, DifficultyProfile.ThreatScore));
+	}
 	for (const FEnemyCombatant& E : Enemies)
 	{
 		Log(FString::Printf(TEXT("遭遇敌人: %s (HP %d)"), *E.State.Name, E.State.HP));
@@ -807,9 +1033,9 @@ bool UCombatEngine::PlayCard(int32 HandIndex, int32 TargetEnemyIndex)
 		{
 			const int32 TriggerCount = FMath::Min(SwordArtFlowCount, SwordArtFlowCount * 3 - SwordArtFlowTriggeredThisTurn);
 			SwordArtFlowTriggeredThisTurn += TriggerCount;
-			OneSwordEnhance += TriggerCount * 3;
+			OneSwordEnhance += TriggerCount * 2;
 			Log(FString::Printf(TEXT("功法【剑意不绝】运转: %d 重功法强化【一剑】+%d (当前强化 %d)"),
-				TriggerCount, TriggerCount * 3, OneSwordEnhance));
+				TriggerCount, TriggerCount * 2, OneSwordEnhance));
 			EnsureOneSwordInHand();
 		}
 
@@ -834,9 +1060,8 @@ bool UCombatEngine::PlayCard(int32 HandIndex, int32 TargetEnemyIndex)
 	{
 		const int32 TriggerCount = FMath::Min(SwordArtFlowCount, SwordArtFlowCount * 3 - SwordArtFlowTriggeredThisTurn);
 		SwordArtFlowTriggeredThisTurn += TriggerCount;
-		OneSwordEnhance += TriggerCount * 3;
 		Log(FString::Printf(TEXT("功法【剑意不绝】运转: %d 重功法强化【一剑】+%d (当前强化 %d)"),
-			TriggerCount, TriggerCount * 3, OneSwordEnhance));
+			TriggerCount, TriggerCount * 2, OneSwordEnhance));
 		EnsureOneSwordInHand();
 	}
 
@@ -1552,9 +1777,13 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 	else if (A == TEXT("one_sword_strike"))
 	{
 		const int32 BaseDmg = V;
-		const int32 TotalDmg = BaseDmg + OneSwordEnhance * 6;
+		// One Sword's own enhancement is a flat per-stack contribution to the
+		// strike base.  Strength is applied exactly once by DealDamageToEnemy()
+		// below, so this explicit enhancement must never become a multiplier for
+		// Strength (or any other attacker status).
+		const int32 TotalDmg = BaseDmg + OneSwordEnhance * 3;
 		const int32 Reps = bOneSwordMultipliedThisTurn ? 2 : 1;
-		Log(FString::Printf(TEXT("【一剑】! 基础 %d + 强化 %d×6 = %d 伤害%s"),
+		Log(FString::Printf(TEXT("【一剑】! 基础 %d + 强化 %d×3 = %d 伤害%s"),
 			BaseDmg, OneSwordEnhance, TotalDmg, Reps > 1 ? TEXT(" (触发两次)") : TEXT("")));
 		for (int32 r = 0; r < Reps; ++r)
 		{
@@ -1618,7 +1847,10 @@ void UCombatEngine::ExecuteEffect(const FCardEffect& Effect, int32 TargetEnemyIn
 
 int32 UCombatEngine::CalcAttackDamage(int32 Base, FCombatantState& Attacker, FCombatantState& Defender) const
 {
-	float Dmg = static_cast<float>(Base + Attacker.GetStatusStacks(TEXT("strength")));
+	// Strength is a flat additive bonus to each emitted attack segment. Callers
+	// invoke this once per hit; explicit repeat/multiplier effects are handled by
+	// their own effect branches and must not be folded into the Strength term.
+	float Dmg = static_cast<float>(Base) + static_cast<float>(Attacker.GetStatusStacks(TEXT("strength")));
 	if (Attacker.GetStatusStacks(TEXT("weak")) > 0) Dmg *= 0.75f;
 	if (Defender.GetStatusStacks(TEXT("vulnerable")) > 0) Dmg *= 1.5f;
 	// 被动法器加成（每损失5%HP+1伤害等）
@@ -1641,6 +1873,7 @@ void UCombatEngine::DealDamageToEnemy(int32 Amount, int32 EnemyIndex, const FStr
 
 	Log(FString::Printf(TEXT("  %s 受到 %d 点伤害 (罡气抵挡 %d, HP %d/%d)"),
 		*E.State.Name, Dmg, Absorbed, FMath::Max(0, E.State.HP), E.State.MaxHP));
+	EnemyDamageEvents.Add({EnemyIndex, Dmg});
 
 	TriggerRelicsWithValue(TEXT("on_damage_dealt"), Dmg);
 	int32 DamageEventValue = FMath::Max(0, Dmg - Absorbed);

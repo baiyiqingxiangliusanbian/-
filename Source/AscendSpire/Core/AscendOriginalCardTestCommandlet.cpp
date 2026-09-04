@@ -1,14 +1,22 @@
 #include "AscendOriginalCardTestCommandlet.h"
 
 #include "Combat/CombatEngine.h"
+#include "AscendPlayerController.h"
 #include "CardScriptCompiler.h"
 #include "Dom/JsonObject.h"
 #include "InfiniteNarrativeService.h"
+#include "PrivateReasoningPrefillLoader.h"
 #include "JsonObjectConverter.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Containers/StringConv.h"
 #include "NarrativePromptManager.h"
 #include "RunManager.h"
+#include "GameDataLibrary.h"
+#include "UI/CardVisualResolver.h"
+#include "NarrativeGuidanceRegressionTests.h"
+#include "OpeningRelicRandomRegressionTests.h"
+#include "HAL/PlatformTime.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
@@ -23,6 +31,26 @@ namespace
 		TArray<TSharedPtr<FJsonValue>> Choices;
 		Choices.Add(MakeShared<FJsonValueObject>(Choice));
 		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+		Root->SetArrayField(TEXT("choices"), Choices);
+		FString Result;
+		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Result);
+		FJsonSerializer::Serialize(Root.ToSharedRef(), Writer);
+		return Result;
+	}
+
+	FString MakeOpeningWordingContent(const TArray<FString>& RelicIds,
+		const TArray<FString>& Texts, bool bAddUnauthorizedField = false)
+	{
+		TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
+		TArray<TSharedPtr<FJsonValue>> Choices;
+		for (int32 Index = 0; Index < FMath::Min(RelicIds.Num(), Texts.Num()); ++Index)
+		{
+			TSharedPtr<FJsonObject> Choice = MakeShared<FJsonObject>();
+			Choice->SetStringField(TEXT("choice_id"), RelicIds[Index]);
+			Choice->SetStringField(TEXT("text"), Texts[Index]);
+			if (bAddUnauthorizedField && Index == 0) Choice->SetStringField(TEXT("next"), TEXT("combat"));
+			Choices.Add(MakeShared<FJsonValueObject>(Choice));
+		}
 		Root->SetArrayField(TEXT("choices"), Choices);
 		FString Result;
 		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Result);
@@ -108,6 +136,183 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 		&& (*NaturalEffects)[2]->AsObject()->GetStringField(TEXT("source")) == TEXT("self_block")
 		&& (*NaturalEffects)[2]->AsObject()->GetStringField(TEXT("destination")) == TEXT("self_status:strength"),
 		TEXT("CardScript accepts natural English verbs and arrow-free resource conversion"));
+	FCardData BlockConversionCard;
+	FString BlockConversionFeedback;
+	Check(Service->TestCardForgeCandidateForAutomationTest(TEXT(
+		"name: 罡尽开门\nrarity: uncommon\ntype: talisman\ncost: 1\n"
+		"play: damage 1 enemy scale self_block factor 1\n"
+		"play: self_block -> target_status:vulnerable consume\n"
+		"upgrade_play: damage 3 enemy scale self_block factor 1\n"
+		"upgrade_play: self_block -> target_status:vulnerable consume"),
+		12, BlockConversionCard, BlockConversionFeedback)
+		&& BlockConversionCard.Effects.Num() == 2
+		&& BlockConversionCard.Effects[0].ScaleBy == TEXT("self_block")
+		&& BlockConversionCard.Effects[1].Destination == TEXT("target_status:vulnerable")
+		&& BlockConversionCard.Effects[1].bConsumeSource
+		&& BlockConversionCard.Description.Contains(TEXT("易伤"))
+		&& BlockConversionCard.Description.Contains(TEXT("消耗来源")),
+		TEXT("CardScript faithfully implements damage first, then consumes all block into vulnerable"));
+	FCardData MissingStatusCard;
+	FString MissingStatusFeedback;
+	Check(!Service->TestCardForgeCandidateForAutomationTest(TEXT(
+		"name: 猜测毒性\nrarity: uncommon\ncost: 1\nplay: apply_status 1"),
+		12, MissingStatusCard, MissingStatusFeedback)
+		&& MissingStatusFeedback.Contains(TEXT("缺少明确 status"))
+		&& !MissingStatusFeedback.Contains(TEXT("PASS")),
+		TEXT("CardScript rejects an unspecified status instead of silently guessing poison"));
+	FString AgentAction;
+	FString AgentIntendedText;
+	FString AgentScript;
+	FString AgentImplementationCheck;
+	FString AgentPowerCheck;
+	FString AgentContent;
+	FString AgentProtocolError;
+	Check(Service->ParseCardForgeAgentStepForAutomationTest(MakeTransportResponse(TEXT(
+		"{\"action\":\"try_card\",\"intended_text\":\"寒针刺破旧伤，使毒意沿霜痕蔓延\","
+		"\"script\":\"name: 霜痕针\\nrarity: uncommon\\ncost: 1\\nplay: damage 6\\nplay: poison 1\"}")),
+		AgentAction, AgentIntendedText, AgentScript, AgentImplementationCheck, AgentPowerCheck,
+		AgentContent, AgentProtocolError)
+		&& AgentAction == TEXT("try_card") && AgentScript.Contains(TEXT("霜痕针"))
+		&& AgentScript.Contains(TEXT("poison 1")) && AgentIntendedText.Contains(TEXT("旧伤")),
+		TEXT("card forge agent protocol extracts its story design target and executable script"));
+	FString LegacyAgentAction;
+	FString LegacyAgentIntendedText;
+	FString LegacyAgentScript;
+	FString LegacyImplementationCheck;
+	FString LegacyPowerCheck;
+	FString LegacyAgentContent;
+	FString LegacyAgentError;
+	Check(Service->ParseCardForgeAgentStepForAutomationTest(MakeTransportResponse(TEXT(
+		"{\"action\":\"finish_card\",\"script\":\"name: 旧路兼容\\nplay: block 5\"}")),
+		LegacyAgentAction, LegacyAgentIntendedText, LegacyAgentScript,
+		LegacyImplementationCheck, LegacyPowerCheck, LegacyAgentContent, LegacyAgentError)
+		&& LegacyAgentAction == TEXT("try_card") && LegacyAgentScript.Contains(TEXT("旧路兼容")),
+		TEXT("legacy finish actions carrying a script remain compatible with try_card"));
+	FString ReviewAction;
+	FString ReviewIntendedText;
+	FString ReviewScript;
+	FString ReviewImplementationCheck;
+	FString ReviewPowerCheck;
+	FString ReviewContent;
+	FString ReviewError;
+	Check(Service->ParseCardForgeAgentStepForAutomationTest(MakeTransportResponse(TEXT(
+		"{\"action\":\"accept_card\","
+		"\"implementation_check\":\"真实卡面逐项对应预期，没有额外状态或代价\","
+		"\"power_check\":\"低值：无罡气时无收益；常见值：六点罡气形成合理转换；上限值：高罡气爆发但会失去全部防御\"}")),
+		ReviewAction, ReviewIntendedText, ReviewScript, ReviewImplementationCheck, ReviewPowerCheck,
+		ReviewContent, ReviewError)
+		&& ReviewAction == TEXT("accept_card")
+		&& ReviewImplementationCheck.Contains(TEXT("没有额外"))
+		&& ReviewPowerCheck.Contains(TEXT("低值")) && ReviewPowerCheck.Contains(TEXT("常见值"))
+		&& ReviewPowerCheck.Contains(TEXT("上限值")),
+		TEXT("card forge protocol carries explicit implementation fidelity and power review before acceptance"));
+	FCardData ToolTestCard;
+	FString ToolTestFeedback;
+	const double DryRunStartedAt = FPlatformTime::Seconds();
+	const bool bDryRunPassed = Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 霜痕针\nrarity: uncommon\ncost: 1\nexhaust\nplay: damage 6\nplay: poison 1"),
+		12, ToolTestCard, ToolTestFeedback);
+	UE_LOG(LogTemp, Display, TEXT("[CardForgePerf] local dry-run elapsed=%.3fms"),
+		(FPlatformTime::Seconds() - DryRunStartedAt) * 1000.0);
+	Check(bDryRunPassed
+		&& ToolTestCard.Effects.Num() == 2 && ToolTestFeedback.StartsWith(TEXT("PASS："))
+		&& ToolTestFeedback.Contains(TEXT("无头战斗 smoke test")),
+		TEXT("try_card compiles and plays base plus upgrade through a lightweight headless combat smoke test"));
+	FCardData DuplicateNameCard;
+	FString DuplicateNameFeedback;
+	Check(!Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 基础剑诀\nrarity: common\ncost: 1\nplay: damage 7"),
+		12, DuplicateNameCard, DuplicateNameFeedback)
+		&& DuplicateNameFeedback.Contains(TEXT("卡名"))
+		&& DuplicateNameFeedback.Contains(TEXT("重复")),
+		TEXT("try_card repairs duplicate names that would collide with an existing card definition"));
+	FCardData DuplicateEffectCard;
+	FString DuplicateEffectFeedback;
+	Check(!Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 双重空转\nrarity: uncommon\ncost: 1\nplay: gain_spirit 1\nplay: gain_spirit 1"),
+		12, DuplicateEffectCard, DuplicateEffectFeedback)
+		&& DuplicateEffectFeedback.Contains(TEXT("完全重复")),
+		TEXT("try_card repairs mechanically identical duplicate effects instead of accepting stitched output"));
+	FCardData UnreachableCounterCard;
+	FString UnreachableCounterFeedback;
+	Check(!Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 无源刻度\nrarity: uncommon\ncost: 1\nplay: damage 5 if counter_at_least:2"),
+		12, UnreachableCounterCard, UnreachableCounterFeedback)
+		&& UnreachableCounterFeedback.Contains(TEXT("计数永远不会增长")),
+		TEXT("try_card repairs counter gates that have no runtime counter source"));
+	FCardData UnreachableVariableCard;
+	FString UnreachableVariableFeedback;
+	Check(!Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 空墨借势\nrarity: uncommon\ncost: 1\ncounter: on_sword_play\n"
+			"play: damage 4 scale var:ink factor 2"),
+		12, UnreachableVariableCard, UnreachableVariableFeedback)
+		&& UnreachableVariableFeedback.Contains(TEXT("var:ink"))
+		&& UnreachableVariableFeedback.Contains(TEXT("永远只会读到 0")),
+		TEXT("try_card repairs custom variables that are read without any runtime write source"));
+	FCardData ReachableVariableCard;
+	FString ReachableVariableFeedback;
+	Check(Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 墨潮回锋\nrarity: uncommon\ncost: 1\n"
+			"card_played: var:void -> var:ink add value 1 if event_tag_is:sword limit 3\n"
+			"play: damage 4 scale var:ink factor 2"),
+		12, ReachableVariableCard, ReachableVariableFeedback)
+		&& ReachableVariableFeedback.StartsWith(TEXT("PASS：")),
+		TEXT("try_card accepts a custom variable when the card supplies an executable write source"));
+	FCardData DenseCard;
+	FString DenseCardFeedback;
+	Check(!Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 万象冗卷\nrarity: rare\ncost: 2\nplay: damage 4\nplay: block 4\n"
+			"play: poison 1\nplay: weak 1\nplay: draw 1"),
+		12, DenseCard, DenseCardFeedback)
+		&& DenseCardFeedback.Contains(TEXT("卡面过密"))
+		&& DenseCardFeedback.Contains(TEXT("4 个效果")),
+		TEXT("try_card repairs dense cards that cannot be scanned clearly on the card face"));
+	FCardData ExplicitUpgradeCard;
+	FString ExplicitUpgradeFeedback;
+	Check(Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 霜痕进境\nrarity: uncommon\ncost: 1\nplay: damage 6\n"
+			"upgrade_cost: 0\nupgrade_play: damage 9"),
+		12, ExplicitUpgradeCard, ExplicitUpgradeFeedback)
+		&& ExplicitUpgradeCard.UpgradedCost == 0
+		&& ExplicitUpgradeCard.UpgradedEffects.Num() == 1
+		&& ExplicitUpgradeCard.UpgradedEffects[0].Value == 9,
+		TEXT("CardScript lets the agent implement an explicit executable upgrade"));
+	FCardData UnchangedUpgradeCard;
+	FString UnchangedUpgradeFeedback;
+	Check(!Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 原地踏步\nrarity: uncommon\ncost: 1\nplay: damage 5\nupgrade_play: damage 5"),
+		12, UnchangedUpgradeCard, UnchangedUpgradeFeedback)
+		&& UnchangedUpgradeFeedback.Contains(TEXT("升级版与基础版完全相同")),
+		TEXT("try_card repairs explicit upgrades that do not materially change the card"));
+	FCardData FailedToolCard;
+	FString FailedToolFeedback;
+	Check(!Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 坏脚本\nplay: lunar_beam 99"), 12, FailedToolCard, FailedToolFeedback)
+		&& FailedToolFeedback.StartsWith(TEXT("ERROR：")),
+		TEXT("card forge test feedback returns a compact actionable error for unsupported mechanics"));
+	FCardData RecursiveRuleCard;
+	FString RecursiveRuleFeedback;
+	Check(!Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 无尽回音\nrarity: rare\ncost: 2\ndamage_dealt: damage 3"),
+		12, RecursiveRuleCard, RecursiveRuleFeedback)
+		&& RecursiveRuleFeedback.Contains(TEXT("可能再次触发自身"))
+		&& RecursiveRuleFeedback.Contains(TEXT("limit")),
+		TEXT("try_card blocks only an immediate unbounded self-triggering combat rule"));
+	FCardData BoundedRuleCard;
+	FString BoundedRuleFeedback;
+	Check(Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 一度回音\nrarity: rare\ncost: 2\ndamage_dealt: damage 3 limit 1"),
+		12, BoundedRuleCard, BoundedRuleFeedback)
+		&& BoundedRuleCard.Effects.Num() == 1,
+		TEXT("the same expressive combat rule passes once it has a finite trigger limit"));
+	FCardData SoftWarningCard;
+	FString SoftWarningFeedback;
+	Check(Service->TestCardForgeCandidateForAutomationTest(
+		TEXT("name: 轻灵双式\nrarity: uncommon\ncost: 0\nplay: damage 4\nplay: block 4"),
+		12, SoftWarningCard, SoftWarningFeedback)
+		&& SoftWarningFeedback.StartsWith(TEXT("PASS："))
+		&& SoftWarningFeedback.Contains(TEXT("WARN：")),
+		TEXT("soft balance concerns remain warnings and never add another agent turn"));
 	FCardData LenientConditionCard;
 	FString LenientConditionError;
 	Check(Service->ParseForgedCardForAutomationTest(MakeTransportResponse(TEXT(
@@ -482,14 +687,28 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 	BuiltInNarrativeContext.OutputContract = TEXT("OUTPUT");
 	BuiltInNarrativeContext.Macros.Add(TEXT("currentTurn"), TEXT("CURRENT"));
 	BuiltInNarrativeContext.Macros.Add(TEXT("capabilityManifest"), TEXT("TOOLS"));
+	const FString BuiltInHistorySentinel = TEXT("synthetic post-history sentinel");
+	BuiltInNarrativeContext.ChatHistory.Add({TEXT("assistant"), BuiltInHistorySentinel + TEXT(" A")});
+	BuiltInNarrativeContext.ChatHistory.Add({TEXT("user"), BuiltInHistorySentinel + TEXT(" B")});
 	FString BuiltInNarrativeDiagnostic;
 	const TArray<FNarrativePromptMessage> BuiltInNarrativeMessages = bBuiltInNarrativeLoaded
 		? FNarrativePromptManager::BuildMessages(BuiltInNarrativePreset, BuiltInNarrativeContext,
 			BuiltInNarrativeDiagnostic) : TArray<FNarrativePromptMessage>();
+	const int32 LastBuiltInHistoryIndex = BuiltInNarrativeMessages.FindLastByPredicate(
+		[&BuiltInHistorySentinel](const FNarrativePromptMessage& Message)
+		{
+			return Message.Content.Contains(BuiltInHistorySentinel);
+		});
+	const int32 RouteExamplesIndex = BuiltInNarrativeMessages.IndexOfByPredicate(
+		[](const FNarrativePromptMessage& Message)
+		{
+			return Message.Content.Contains(TEXT("抽到hp=-10"))
+				&& Message.Content.Contains(TEXT("抽到card_forge"))
+				&& Message.Content.Contains(TEXT("不得加冒号、解释、效果、费用、脚本"));
+		});
 	Check(bBuiltInNarrativeLoaded && BuiltInNarrativeMessages.Num() > 0
-		&& BuiltInNarrativeMessages.Last().Content.Contains(TEXT("抽到hp=-10"))
-		&& BuiltInNarrativeMessages.Last().Content.Contains(TEXT("抽到card_forge"))
-		&& BuiltInNarrativeMessages.Last().Content.Contains(TEXT("不得加冒号、解释、效果、费用、脚本")),
+		&& RouteExamplesIndex != INDEX_NONE && LastBuiltInHistoryIndex != INDEX_NONE
+		&& RouteExamplesIndex > LastBuiltInHistoryIndex,
 		TEXT("single-pass director receives post-history examples for explaining pre-rolled engine routes"));
 
 	FString RouteWorldBookJson;
@@ -622,6 +841,38 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 		TEXT("combat engine instantiates every member of a restored locally-scaled enemy group"));
 	PendingGroupRun->ClearPendingInfiniteCombat();
 
+	TArray<FDeckCard> DuplicateTargetDeck;
+	for (int32 CardIndex = 0; CardIndex < 5; ++CardIndex)
+	{
+		FDeckCard StrikeCard;
+		StrikeCard.CardId = TEXT("strike");
+		DuplicateTargetDeck.Add(StrikeCard);
+	}
+	UCombatEngine* DuplicateTargetCombat = NewObject<UCombatEngine>();
+	const bool bDuplicateTargetStarted = DuplicateTargetCombat->StartCombat(
+		DuplicateTargetDeck, {TEXT("mountain_imp"), TEXT("mountain_imp")}, {}, 74, 74, 0, 20260831, 0);
+	if (bDuplicateTargetStarted && DuplicateTargetCombat->Enemies.Num() == 2)
+	{
+		// Reproduce the presentation bug: the left copy is already dead while the
+		// player explicitly attacks the live, identically named copy on the right.
+		DuplicateTargetCombat->Enemies[0].State.HP = 0;
+		const int32 RightEnemyHPBefore = DuplicateTargetCombat->Enemies[1].State.HP;
+		const int32 StrikeIndex = DuplicateTargetCombat->Hand.IndexOfByPredicate([](const FCardInstance& Card)
+			{ return Card.Data.Id == TEXT("strike"); });
+		const bool bRightEnemyHit = StrikeIndex != INDEX_NONE
+			&& DuplicateTargetCombat->PlayCard(StrikeIndex, 1);
+		const FEnemyDamageEvent* LastDamageEvent = DuplicateTargetCombat->EnemyDamageEvents.Num() > 0
+			? &DuplicateTargetCombat->EnemyDamageEvents.Last() : nullptr;
+		Check(bRightEnemyHit && DuplicateTargetCombat->Enemies[0].State.HP == 0
+			&& DuplicateTargetCombat->Enemies[1].State.HP < RightEnemyHPBefore
+			&& LastDamageEvent && LastDamageEvent->EnemyIndex == 1 && LastDamageEvent->Damage > 0,
+			TEXT("damage presentation keeps the selected enemy index when a dead left enemy has the same name"));
+	}
+	else
+	{
+		Check(false, TEXT("damage presentation keeps the selected enemy index when a dead left enemy has the same name"));
+	}
+
 	const FString MissingResultContent = TEXT(
 		"{\"schema_version\":\"2.0-direct-route\",\"scene\":{\"title\":\"断桥\","
 		"\"narration\":\"断桥另一端传来铁索声。\",\"dialogue\":\"\",\"messages\":[]},\"choices\":["
@@ -737,6 +988,38 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 	URunManager* Run = NewObject<URunManager>();
 	Run->SetPersistentAuthoredContentEnabledForAutomationTest(false);
 	Check(Run->StartNewRun(20260807, true), TEXT("isolated infinite-narrative run initializes"));
+	const FCardData* OneSwordVisual = Run->GetCardData(TEXT("one_sword"));
+	Check(OneSwordVisual && OneSwordVisual->Visual.Animation == TEXT("greatsword")
+		&& OneSwordVisual->Visual.Sound == TEXT("sword_heavy")
+		&& OneSwordVisual->Visual.Intensity >= 10.f,
+		TEXT("One Sword registers the dedicated heavy greatsword impact family"));
+	const FCardData* MyriadSwordVisual = Run->GetCardData(TEXT("wan_jian_gui_zong"));
+	Check(MyriadSwordVisual && MyriadSwordVisual->Visual.Animation == TEXT("myriad_swords")
+		&& MyriadSwordVisual->Visual.Sound == TEXT("sword_flurry")
+		&& MyriadSwordVisual->Visual.Count >= 7,
+		TEXT("Myriad Swords registers the staggered multi-hit visual and audio family"));
+	TArray<FCardData> StaticVisualCards;
+	FString StaticVisualLoadError;
+	const bool bStaticVisualCardsLoaded = UGameDataLibrary::LoadCards(StaticVisualCards, StaticVisualLoadError);
+	bool bAllStaticCardsHaveAnimation = bStaticVisualCardsLoaded && StaticVisualCards.Num() >= 55;
+	bool bAllStaticCardsHaveSound = bAllStaticCardsHaveAnimation;
+	TSet<FString> StaticAnimationFamilies;
+	for (const FCardData& StaticCard : StaticVisualCards)
+	{
+		FCardInstance Instance;
+		Instance.Data = StaticCard;
+		const FString Animation = AscendCardVisual::ResolveAnimation(Instance);
+		const FString Sound = AscendCardVisual::ResolveSound(Instance, Animation);
+		bAllStaticCardsHaveAnimation &= !Animation.IsEmpty() && Animation != TEXT("none");
+		bAllStaticCardsHaveSound &= !Sound.IsEmpty() && Sound != TEXT("none");
+		StaticAnimationFamilies.Add(Animation);
+	}
+	Check(bAllStaticCardsHaveAnimation,
+		TEXT("every static card routes to a non-placeholder animation family"));
+	Check(bAllStaticCardsHaveSound,
+		TEXT("every static card routes to an audible feedback family"));
+	Check(StaticAnimationFamilies.Num() >= 12,
+		TEXT("the static library spans at least twelve distinct visual families"));
 	Run->GenerateNarrativeShopStock(TEXT("legendary"), 1.5f, 6);
 	const TArray<FShopItem> NarrativeShop = Run->GetShopStock();
 	Check(NarrativeShop.Num() > 0 && NarrativeShop.ContainsByPredicate([Run](const FShopItem& Item)
@@ -764,7 +1047,7 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 	TArray<FInfiniteVariableUpdate> TypedUpdates;
 	FInfiniteVariableUpdate AffinityUpdate;
 	AffinityUpdate.Domain = TEXT("relationship");
-	AffinityUpdate.Target = TEXT("shen_zhaoli");
+	AffinityUpdate.Target = TEXT("test_companion");
 	AffinityUpdate.Field = TEXT("affinity");
 	AffinityUpdate.Op = TEXT("add");
 	AffinityUpdate.Amount = 22;
@@ -785,7 +1068,9 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 	TypedUpdates.Add(LocationUpdate);
 	TArray<FString> VariableReceipts;
 	Run->ApplyInfiniteVariableUpdates(TypedUpdates, VariableReceipts);
-	Check(Run->State.RPRelationships.Num() == 1 && Run->State.RPRelationships[0].Affinity == 27
+	Check(Run->State.RPRelationships.Num() == 1
+		&& Run->State.RPRelationships[0].CharacterId == TEXT("test_companion")
+		&& Run->State.RPRelationships[0].Affinity == 22
 		&& Run->State.RPCurrentLocation == TEXT("落雁峡密道") && VariableReceipts.Num() == 3,
 		TEXT("typed RP variables apply relationship and environment transitions with receipts"));
 	FInfiniteVariableUpdate FakeTaskUpdate;
@@ -1053,6 +1338,419 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 		&& CompositionalBeat.Choices[2].Reward.CreatedCards[0].Effects[0].Destination == TEXT("strike"),
 		TEXT("composite thresholds survive validation and display-name card references normalize to runtime IDs"));
 
+	// ---------------------------------------------------------------------
+	// Finite authored openings + first-combat narrative prefetch regression
+	// ---------------------------------------------------------------------
+	const TSet<FString> ExpectedOpeningDiagnostics = {
+		TEXT("authored_opening:qinghe_spirit_stone"),
+		TEXT("authored_opening:lingpan_last_chime"),
+		TEXT("authored_opening:ancestral_house_lamp"),
+		TEXT("authored_opening:third_furnace_watch"),
+		TEXT("authored_opening:father_debt_box")
+	};
+	URunManager* OpeningRun = NewObject<URunManager>();
+	OpeningRun->SetPersistentAuthoredContentEnabledForAutomationTest(false);
+	const bool bOpeningRunStarted = OpeningRun->StartNewRun(20260903, true);
+	const TArray<FString> OpeningRelicIds = OpeningRun->RollInitialRelicChoices(3);
+	TArray<FRelicData> OpeningRelics;
+	TSet<FString> OpeningRelicIdSet;
+	for (const FString& RelicId : OpeningRelicIds)
+	{
+		if (const FRelicData* Relic = OpeningRun->GetRelicData(RelicId))
+		{
+			OpeningRelics.Add(*Relic);
+			OpeningRelicIdSet.Add(RelicId);
+		}
+	}
+	const bool bOpeningRelicsDistinctAndValid = bOpeningRunStarted
+		&& OpeningRelicIds.Num() == 3 && OpeningRelics.Num() == 3
+		&& OpeningRelicIdSet.Num() == 3;
+	Check(bOpeningRelicsDistinctAndValid,
+		TEXT("opening relic pool rolls three real, mutually distinct relic definitions"));
+	if (OpeningRelicIds.Num() > 0)
+	{
+		OpeningRun->State.RelicIds.Add(OpeningRelicIds[0]);
+		const TArray<FString> RerolledRelicIds = OpeningRun->RollInitialRelicChoices(3);
+		TSet<FString> RerolledRelicIdSet;
+		for (const FString& RelicId : RerolledRelicIds) RerolledRelicIdSet.Add(RelicId);
+		Check(!RerolledRelicIds.Contains(OpeningRelicIds[0])
+			&& RerolledRelicIdSet.Num() == RerolledRelicIds.Num(),
+			TEXT("initial relic reroll excludes already-owned relics and still deduplicates its pool"));
+	}
+	TSet<FString> OpeningDiagnostics;
+	TSet<FString> OpeningCombatTemplates;
+	TSet<FString> OpeningFallbackLeads;
+	int32 OpeningCombatChoiceCount = 0;
+	int32 OpeningContinueChoiceCount = 0;
+	bool bOpeningChoicesLeadOnly = true;
+	bool bFiniteOpeningsValid = true;
+	for (int32 OpeningIndex = 0; OpeningIndex < 5; ++OpeningIndex)
+	{
+		const FInfiniteNarrativeBeat Opening =
+			AAscendPlayerController::BuildAuthoredOpeningForAutomationTest(OpeningIndex, OpeningRelics);
+		OpeningDiagnostics.Add(Opening.Diagnostic);
+		bFiniteOpeningsValid = bFiniteOpeningsValid
+			&& !Opening.bError
+			&& !Opening.Title.IsEmpty()
+			&& !Opening.Narration.IsEmpty()
+			&& Opening.Choices.Num() == 3
+				&& ExpectedOpeningDiagnostics.Contains(Opening.Diagnostic);
+		if (Opening.Choices.IsValidIndex(0)) OpeningFallbackLeads.Add(Opening.Choices[0].Text);
+		TSet<FString> OpeningFallbackChoices;
+		TSet<FString> OpeningChoiceRelicIds;
+		FString SharedResultSummary;
+		FString SharedConsequenceIntent;
+		FString SharedResolvedImpactKind;
+		FString SharedResolvedImpactObject;
+		FString SharedSettlementKey;
+		FString SharedStatePatchJson;
+		FInfiniteEnemySpec SharedEnemy;
+		bool bSharedRewardShape = false;
+		bool bHasSharedOpeningShape = false;
+		for (const FInfiniteNarrativeChoice& Choice : Opening.Choices)
+		{
+			const FString ChoiceRelicId = Choice.Reward.RelicIds.Num() == 1
+				? Choice.Reward.RelicIds[0] : TEXT("");
+			bFiniteOpeningsValid = bFiniteOpeningsValid
+				&& !Choice.Text.IsEmpty()
+				&& !Choice.ResultSummary.IsEmpty()
+				&& !Choice.ConsequenceIntent.IsEmpty()
+					&& Choice.ResolvedImpactKind == TEXT("acquire_relic")
+				&& Choice.bResolvedImpactCompleted
+				&& !Choice.bResolvedImpactPersistent
+				&& Choice.SettlementKey.StartsWith(TEXT("authored_opening_relic:"))
+				&& Choice.bGrantRewardBeforeCombat
+					&& Choice.Reward.RelicIds.Num() == 1
+					&& OpeningRelicIdSet.Contains(ChoiceRelicId);
+			if (const FRelicData* Relic = OpeningRun->GetRelicData(ChoiceRelicId))
+			{
+				bFiniteOpeningsValid = bFiniteOpeningsValid
+					&& !Choice.Text.Contains(Relic->Id)
+					&& (Relic->Name.IsEmpty() || !Choice.Text.Contains(Relic->Name))
+					&& (Relic->Description.IsEmpty() || !Choice.Text.Contains(Relic->Description.Left(180)))
+					&& UInfiniteNarrativeService::IsOpeningChoiceWordingSafe(Choice.Text,
+						Relic->Id, Relic->Name, Relic->Description, Relic->Rarity);
+			}
+			const int32 FallbackChoiceCountBefore = OpeningFallbackChoices.Num();
+			OpeningFallbackChoices.Add(Choice.Text);
+			if (OpeningFallbackChoices.Num() == FallbackChoiceCountBefore)
+				bOpeningChoicesLeadOnly = false;
+			if (!bHasSharedOpeningShape)
+			{
+				SharedResultSummary = Choice.ResultSummary;
+				SharedConsequenceIntent = Choice.ConsequenceIntent;
+				SharedResolvedImpactKind = Choice.ResolvedImpactKind;
+				SharedResolvedImpactObject = Choice.ResolvedImpactObject;
+				SharedSettlementKey = Choice.SettlementKey;
+				SharedStatePatchJson = Choice.StatePatchJson;
+				SharedEnemy = Choice.Enemy;
+				bSharedRewardShape = Choice.Reward.Cards.Num() == 0
+					&& Choice.Reward.CreatedCards.Num() == 0
+					&& Choice.Reward.CreatedRelics.Num() == 0
+					&& Choice.Reward.RemovedCardIds.Num() == 0
+					&& Choice.Reward.RemovedRelicIds.Num() == 0
+					&& Choice.Reward.GoldChange == 0 && Choice.Reward.HPChange == 0;
+				bHasSharedOpeningShape = true;
+			}
+			else
+			{
+				bFiniteOpeningsValid = bFiniteOpeningsValid
+					&& Choice.ResultSummary == SharedResultSummary
+					&& Choice.ConsequenceIntent == SharedConsequenceIntent
+					&& Choice.ResolvedImpactKind == SharedResolvedImpactKind
+					&& Choice.ResolvedImpactObject == SharedResolvedImpactObject
+					&& Choice.SettlementKey == SharedSettlementKey
+					&& Choice.StatePatchJson == SharedStatePatchJson
+					&& Choice.bResolvedImpactCompleted
+					&& Choice.bResolvedImpactPersistent == false
+					&& Choice.Reward.Cards.Num() == 0
+					&& Choice.Reward.CreatedCards.Num() == 0
+					&& Choice.Reward.CreatedRelics.Num() == 0
+					&& Choice.Reward.RemovedCardIds.Num() == 0
+					&& Choice.Reward.RemovedRelicIds.Num() == 0
+					&& Choice.Reward.GoldChange == 0 && Choice.Reward.HPChange == 0
+					&& bSharedRewardShape
+					&& Choice.Enemy.TemplateId == SharedEnemy.TemplateId
+					&& Choice.Enemy.Name == SharedEnemy.Name
+					&& Choice.Enemy.FactionId == SharedEnemy.FactionId
+					&& Choice.Enemy.Story == SharedEnemy.Story
+					&& FMath::IsNearlyEqual(Choice.Enemy.HPScale, SharedEnemy.HPScale)
+					&& FMath::IsNearlyEqual(Choice.Enemy.IntentScale, SharedEnemy.IntentScale)
+					&& Choice.Enemy.Count == SharedEnemy.Count
+					&& Choice.Enemy.Tier == SharedEnemy.Tier
+					&& Choice.Enemy.Abilities == SharedEnemy.Abilities
+					&& Choice.Enemy.AbilityDesc == SharedEnemy.AbilityDesc;
+			}
+			if (Choice.Next.Equals(TEXT("combat"), ESearchCase::IgnoreCase))
+			{
+				++OpeningCombatChoiceCount;
+				OpeningCombatTemplates.Add(Choice.Enemy.TemplateId);
+				OpeningChoiceRelicIds.Add(ChoiceRelicId);
+				bFiniteOpeningsValid = bFiniteOpeningsValid
+					&& !Choice.Enemy.TemplateId.IsEmpty()
+					&& !Choice.Enemy.Name.IsEmpty()
+					&& !Choice.Enemy.FactionId.IsEmpty()
+					&& !Choice.Enemy.Story.IsEmpty()
+					&& Choice.Enemy.Count == 1;
+			}
+			else
+			{
+				++OpeningContinueChoiceCount;
+				bFiniteOpeningsValid = false;
+			}
+		}
+		bFiniteOpeningsValid = bFiniteOpeningsValid && OpeningChoiceRelicIds.Num() == 3
+			&& OpeningFallbackChoices.Num() == 3;
+	}
+	Check(bFiniteOpeningsValid && OpeningDiagnostics.Num() == 5
+		&& OpeningDiagnostics.Num() == ExpectedOpeningDiagnostics.Num()
+		&& OpeningCombatChoiceCount == 15 && OpeningCombatTemplates.Num() == 5
+		&& OpeningFallbackLeads.Num() == 5
+		&& bOpeningChoicesLeadOnly
+		&& OpeningContinueChoiceCount == 0,
+		TEXT("finite authored openings keep five distinct lead-only fallback sets, share one consequence/enemy, and route every choice to combat"));
+
+	TArray<FString> OpeningWordingIds = {OpeningRelicIds[0], OpeningRelicIds[1], OpeningRelicIds[2]};
+	TArray<FString> OpeningWordingTexts = {TEXT("先护住渡口的退路"), TEXT("先查清灵息的来处"), TEXT("先把法器藏入行囊")};
+	TArray<FString> OpeningWordingNames;
+	TArray<FString> OpeningWordingDescriptions;
+	TArray<FString> OpeningWordingRarities;
+	for (const FRelicData& Relic : OpeningRelics)
+	{
+		OpeningWordingNames.Add(Relic.Name);
+		OpeningWordingDescriptions.Add(Relic.Description);
+		OpeningWordingRarities.Add(Relic.Rarity);
+	}
+	TArray<FString> ReorderedIds = {OpeningWordingIds[2], OpeningWordingIds[0], OpeningWordingIds[1]};
+	TArray<FString> ReorderedTexts = {OpeningWordingTexts[2], OpeningWordingTexts[0], OpeningWordingTexts[1]};
+	TArray<FString> ParsedOpeningWording;
+	FString OpeningWordingError;
+	const bool bOpeningWordingBound = Service->ParseOpeningWordingForAutomationTest(
+		MakeTransportResponse(MakeOpeningWordingContent(ReorderedIds, ReorderedTexts)),
+		OpeningWordingIds, ParsedOpeningWording, OpeningWordingError);
+	Check(bOpeningWordingBound && ParsedOpeningWording.Num() == 3
+		&& ParsedOpeningWording[0] == OpeningWordingTexts[0]
+		&& ParsedOpeningWording[1] == OpeningWordingTexts[1]
+		&& ParsedOpeningWording[2] == OpeningWordingTexts[2],
+		TEXT("opening wording parser restores the locked relic order even when model choices arrive reordered"));
+	TArray<FString> MismatchedIds = ReorderedIds;
+	MismatchedIds[1] = TEXT("relic_not_locked");
+	Check(!Service->ParseOpeningWordingForAutomationTest(
+		MakeTransportResponse(MakeOpeningWordingContent(MismatchedIds, ReorderedTexts)),
+		OpeningWordingIds, ParsedOpeningWording, OpeningWordingError),
+		TEXT("opening wording parser rejects a model attempt to replace a locked relic binding"));
+	Check(!Service->ParseOpeningWordingForAutomationTest(
+		MakeTransportResponse(MakeOpeningWordingContent(OpeningWordingIds, OpeningWordingTexts, true)),
+		OpeningWordingIds, ParsedOpeningWording, OpeningWordingError),
+		TEXT("opening wording parser rejects route/reward fields instead of letting copy mutate engine facts"));
+	TArray<FString> LeakyOpeningTexts = {
+		FString::Printf(TEXT("选择【%s】并查看它的效果"), *OpeningWordingNames[0]),
+		TEXT("先观察现场的动静，再决定下一步"),
+		TEXT("贴着墙根留出退路")
+	};
+	Check(!Service->ParseOpeningWordingForAutomationTest(
+		MakeTransportResponse(MakeOpeningWordingContent(OpeningWordingIds, LeakyOpeningTexts)),
+		OpeningWordingIds, OpeningWordingNames, OpeningWordingDescriptions, OpeningWordingRarities,
+		ParsedOpeningWording, OpeningWordingError),
+		TEXT("opening wording parser rejects exact relic identity/effect leakage and uses the local fallback path"));
+	TArray<FString> CrossLeakyOpeningTexts = {
+		TEXT("先观察现场的动静，再决定下一步"),
+		FString::Printf(TEXT("顺手辨认%s的踪迹"), *OpeningWordingNames[0]),
+		TEXT("贴着墙根留出退路")
+	};
+	Check(!Service->ParseOpeningWordingForAutomationTest(
+		MakeTransportResponse(MakeOpeningWordingContent(OpeningWordingIds, CrossLeakyOpeningTexts)),
+		OpeningWordingIds, OpeningWordingNames, OpeningWordingDescriptions, OpeningWordingRarities,
+		ParsedOpeningWording, OpeningWordingError),
+		TEXT("opening wording parser rejects a choice leaking another locked relic identity"));
+	const TArray<FString> DuplicateOpeningTexts = {
+		TEXT("先观察现场的动静，再决定下一步"), TEXT("先观察现场的动静，再决定下一步"),
+		TEXT("先观察现场的动静，再决定下一步")
+	};
+	Check(!Service->ParseOpeningWordingForAutomationTest(
+		MakeTransportResponse(MakeOpeningWordingContent(OpeningWordingIds, DuplicateOpeningTexts)),
+		OpeningWordingIds, OpeningWordingNames, OpeningWordingDescriptions, OpeningWordingRarities,
+		ParsedOpeningWording, OpeningWordingError),
+		TEXT("opening wording parser rejects three identical model leads so local fallback remains distinguishable"));
+	const FString FormerDisplay = FString::Printf(TEXT("%s\n法器【%s】\n%s"),
+		*OpeningWordingTexts[0], *OpeningWordingNames[0], *OpeningWordingDescriptions[0]);
+	const FString SafeRestoredLead = AAscendPlayerController::FilterAuthoredOpeningChoiceForAutomationTest(
+		TEXT("third_furnace_watch"), 0, OpeningRelics, FormerDisplay);
+	const FString UnsafeLegacyLead = FString::Printf(TEXT("你将获得%s"), *OpeningWordingNames[1]);
+	const FString SafeFallbackLead = AAscendPlayerController::FilterAuthoredOpeningChoiceForAutomationTest(
+		TEXT("third_furnace_watch"), 1, OpeningRelics, UnsafeLegacyLead);
+	Check(SafeRestoredLead == OpeningWordingTexts[0]
+		&& !SafeRestoredLead.Contains(OpeningWordingNames[0])
+		&& !SafeRestoredLead.Contains(OpeningWordingDescriptions[0])
+		&& !SafeFallbackLead.Contains(OpeningWordingNames[0])
+		&& !SafeFallbackLead.Contains(OpeningWordingDescriptions[0])
+		&& SafeFallbackLead != UnsafeLegacyLead,
+		TEXT("restored opening text strips legacy relic details and replaces unsafe legacy leads without rerolling"));
+	const FInfiniteNarrativeBeat RepeatOpening =
+		AAscendPlayerController::BuildAuthoredOpeningForAutomationTest(0, OpeningRelics);
+	bool bOpeningRetryKeepsBindings = RepeatOpening.Choices.Num() == 3;
+	for (int32 Index = 0; Index < 3 && bOpeningRetryKeepsBindings; ++Index)
+	{
+		bOpeningRetryKeepsBindings = RepeatOpening.Choices[Index].Reward.RelicIds
+			== AAscendPlayerController::BuildAuthoredOpeningForAutomationTest(0, OpeningRelics)
+				.Choices[Index].Reward.RelicIds;
+	}
+	Check(bOpeningRetryKeepsBindings,
+		TEXT("rebuilding wording for the same locked opening does not reroll or swap relic bindings"));
+
+	FString SyntheticPrefill;
+	int32 SyntheticPrefillBytes = 0;
+	const bool bSyntheticPrefillLoaded = FPrivateReasoningPrefillLoader::ExtractJsonFieldForAutomationTest(
+		TEXT("{\"preset\":{\"reasoning_chain_prefill\":\"synthetic opaque payload\",\"api_key\":\"must-not-read\"}}"),
+		TEXT("preset.reasoning_chain_prefill"), SyntheticPrefill, SyntheticPrefillBytes);
+	Check(bSyntheticPrefillLoaded && SyntheticPrefill == TEXT("synthetic opaque payload")
+		&& SyntheticPrefillBytes == FTCHARToUTF8(*SyntheticPrefill).Length(),
+		TEXT("hidden prefill loader extracts only the explicitly allow-listed synthetic field and reports opaque byte length"));
+	Check(!FPrivateReasoningPrefillLoader::ExtractJsonFieldForAutomationTest(
+		TEXT("{\"preset\":{\"api_key\":\"must-not-read\"}}"),
+		TEXT("preset.api_key"), SyntheticPrefill, SyntheticPrefillBytes),
+		TEXT("hidden prefill loader refuses sensitive fields and cannot collect API credentials"));
+
+	FRunState PendingOpeningState;
+	PendingOpeningState.bRunActive = true;
+	PendingOpeningState.bInfiniteNarrativeMode = true;
+	PendingOpeningState.bInfiniteOpeningPending = true;
+	PendingOpeningState.PendingInfiniteOpeningIndex = 3;
+	PendingOpeningState.PendingInfiniteOpeningId = TEXT("third_furnace_watch");
+	PendingOpeningState.PendingInfiniteOpeningRelicIds = OpeningWordingIds;
+	PendingOpeningState.PendingInfiniteOpeningChoiceTexts = OpeningWordingTexts;
+	PendingOpeningState.bInfiniteOpeningWordingReady = true;
+	const TSharedPtr<FJsonObject> PendingOpeningJson =
+		FJsonObjectConverter::UStructToJsonObject(PendingOpeningState);
+	FRunState PendingOpeningRoundtrip;
+	const bool bPendingOpeningRoundtrip = PendingOpeningJson.IsValid()
+		&& FJsonObjectConverter::JsonObjectToUStruct(PendingOpeningJson.ToSharedRef(), &PendingOpeningRoundtrip);
+	Check(bPendingOpeningRoundtrip
+		&& PendingOpeningRoundtrip.bInfiniteOpeningPending
+		&& PendingOpeningRoundtrip.PendingInfiniteOpeningIndex == 3
+		&& PendingOpeningRoundtrip.PendingInfiniteOpeningId == TEXT("third_furnace_watch")
+		&& PendingOpeningRoundtrip.PendingInfiniteOpeningRelicIds == OpeningWordingIds
+		&& PendingOpeningRoundtrip.PendingInfiniteOpeningChoiceTexts == OpeningWordingTexts
+		&& PendingOpeningRoundtrip.bInfiniteOpeningWordingReady,
+		TEXT("pending opening state round-trips through the actual FRunState JSON serializer"));
+	TSharedPtr<FJsonObject> LegacyOpeningJson = MakeShared<FJsonObject>();
+	LegacyOpeningJson->SetBoolField(TEXT("bRunActive"), true);
+	LegacyOpeningJson->SetBoolField(TEXT("bInfiniteNarrativeMode"), true);
+	FRunState LegacyOpeningState;
+	const bool bLegacyOpeningParsed = FJsonObjectConverter::JsonObjectToUStruct(
+		LegacyOpeningJson.ToSharedRef(), &LegacyOpeningState);
+	Check(bLegacyOpeningParsed && !LegacyOpeningState.bInfiniteOpeningPending
+		&& LegacyOpeningState.PendingInfiniteOpeningIndex == INDEX_NONE
+		&& LegacyOpeningState.PendingInfiniteOpeningId.IsEmpty()
+		&& LegacyOpeningState.PendingInfiniteOpeningRelicIds.Num() == 0
+		&& LegacyOpeningState.PendingInfiniteOpeningChoiceTexts.Num() == 0,
+		TEXT("legacy saves without pending-opening fields keep safe empty defaults"));
+	OpeningRun->SavePendingInfiniteOpening(3, TEXT("third_furnace_watch"), OpeningRelicIds,
+		OpeningWordingTexts, true);
+	OpeningRun->ClearPendingInfiniteOpening();
+	Check(!OpeningRun->HasPendingInfiniteOpening()
+		&& !OpeningRun->State.bInfiniteOpeningPending
+		&& OpeningRun->State.PendingInfiniteOpeningRelicIds.Num() == 0
+		&& OpeningRun->State.PendingInfiniteOpeningChoiceTexts.Num() == 0,
+		TEXT("clearing a selected opening removes its pending record and completed wording"));
+
+	bool bOpeningRelicsAwardBeforeCombat = true;
+	for (int32 RelicChoiceIndex = 0; RelicChoiceIndex < 3; ++RelicChoiceIndex)
+	{
+		URunManager* AwardRun = NewObject<URunManager>();
+		AwardRun->SetPersistentAuthoredContentEnabledForAutomationTest(false);
+		const bool bAwardRunStarted = AwardRun->StartNewRun(20260910 + RelicChoiceIndex, true);
+		const FInfiniteNarrativeBeat AwardBeat =
+			AAscendPlayerController::BuildAuthoredOpeningForAutomationTest(0, OpeningRelics);
+		const FInfiniteNarrativeChoice& AwardChoice = AwardBeat.Choices[RelicChoiceIndex];
+		const bool bCommitted = bAwardRunStarted
+			&& AwardRun->TryCommitNarrativeSettlement(AwardChoice.SettlementKey);
+		if (bCommitted) AwardRun->ApplyInfiniteNarrativeReward(AwardChoice.Reward);
+		const int32 RelicCountAfterAward = AwardRun->State.RelicIds.Num();
+		bOpeningRelicsAwardBeforeCombat = bOpeningRelicsAwardBeforeCombat
+			&& bCommitted
+			&& AwardChoice.Reward.RelicIds.Num() == 1
+			&& AwardRun->State.RelicIds.Contains(AwardChoice.Reward.RelicIds[0])
+			&& !AwardRun->TryCommitNarrativeSettlement(AwardChoice.SettlementKey)
+			&& AwardRun->State.RelicIds.Num() == RelicCountAfterAward;
+	}
+	Check(bOpeningRelicsAwardBeforeCombat,
+		TEXT("each opening relic choice uses the settlement gate and grants its selected relic before combat without duplicate claims"));
+
+	// The production code uses these pure gates before touching UMG/HTTP state.
+	// Simulate the two calls that can race at combat start/victory: setting the
+	// in-flight bit on the first call must make the second call a no-op.
+	bool bPrefetchRequestInFlight = false;
+	bool bPrefetchReady = false;
+	int32 PrefetchStartCount = 0;
+	if (AAscendPlayerController::ShouldStartCombatNarrativePrefetch(
+		true, true, bPrefetchRequestInFlight, bPrefetchReady))
+	{
+		++PrefetchStartCount;
+		bPrefetchRequestInFlight = true;
+	}
+	if (AAscendPlayerController::ShouldStartCombatNarrativePrefetch(
+		true, true, bPrefetchRequestInFlight, bPrefetchReady)) ++PrefetchStartCount;
+	Check(PrefetchStartCount == 1
+		&& !AAscendPlayerController::ShouldStartCombatNarrativePrefetch(true, true, true, false)
+		&& !AAscendPlayerController::ShouldStartCombatNarrativePrefetch(true, true, false, true)
+		&& !AAscendPlayerController::ShouldStartCombatNarrativePrefetch(false, true, false, false),
+		TEXT("combat prefetch gate is one-shot while in flight or cached, and never runs outside active infinite RP"));
+	Check(AAscendPlayerController::ShouldPrefetchAtCombatStart(true, true)
+		&& !AAscendPlayerController::ShouldPrefetchAtCombatStart(false, true)
+		&& AAscendPlayerController::ShouldPrefetchAtCombatStart(false, false),
+		TEXT("first combat always selects mode B while later combats honor the A/B setting"));
+	const int32 ForcedRPIndexA = AAscendPlayerController::ChooseFreeRPForcedChoiceIndexForAutomationTest(
+		3, 20260904, 17);
+	const int32 ForcedRPIndexB = AAscendPlayerController::ChooseFreeRPForcedChoiceIndexForAutomationTest(
+		3, 20260904, 17);
+	Check(AAscendPlayerController::IsFreeRPInputAvailableForAutomationTest(true, false, false, false)
+		&& !AAscendPlayerController::IsFreeRPInputAvailableForAutomationTest(true, true, false, false)
+		&& !AAscendPlayerController::IsFreeRPInputAvailableForAutomationTest(true, false, true, false)
+		&& !AAscendPlayerController::IsFreeRPInputAvailableForAutomationTest(false, false, false, false)
+		&& AAscendPlayerController::IsFreeRPForcedContinueAvailableForAutomationTest(true, true, false)
+		&& !AAscendPlayerController::IsFreeRPForcedContinueAvailableForAutomationTest(true, true, true)
+		&& !AAscendPlayerController::IsFreeRPForcedContinueAvailableForAutomationTest(true, false, false)
+		&& ForcedRPIndexA == ForcedRPIndexB && ForcedRPIndexA >= 0 && ForcedRPIndexA < 3,
+		TEXT("free RP opens only in its eligible phase, pauses after the response, and locks one replayable direction for the explicit continue"));
+	FString RPDisplayDiagnostic;
+	Check(AAscendPlayerController::ValidateRPNarrativeDisplayForAutomationTest(RPDisplayDiagnostic),
+		TEXT("RP display keeps CRLF paragraph boundaries, two-CJK indentation and Unicode clusters intact"));
+	FString RPStreamMerged;
+	bool bRPStreamRebuilt = false;
+	Check(AAscendPlayerController::MergeRPStreamTextForAutomationTest(
+		TEXT("　　尾段已显示"), TEXT("　　尾段已显示，最终句。"), RPStreamMerged, bRPStreamRebuilt)
+		&& RPStreamMerged == TEXT("　　尾段已显示，最终句。") && !bRPStreamRebuilt,
+		TEXT("stream terminal flush appends an authoritative suffix without rebuilding a matching prefix"));
+	Check(AAscendPlayerController::MergeRPStreamTextForAutomationTest(
+		TEXT("旧的部分前缀"), TEXT("修正后的完整尾文"), RPStreamMerged, bRPStreamRebuilt)
+		&& RPStreamMerged == TEXT("修正后的完整尾文") && bRPStreamRebuilt,
+		TEXT("stream terminal rewrite marks only the mismatching segment for local rebuild"));
+	const FString NormalizedRPDialogue = AAscendPlayerController::NormalizeRPDialogueForAutomationTest(
+		TEXT("角色：\r\n“最终对白”"));
+	const FString RPIdentityA = AAscendPlayerController::MakeRPDialogueIdentityKeyForAutomationTest(
+		TEXT("角色"), TEXT("portrait_a"), TEXT("neutral"));
+	const FString RPIdentityB = AAscendPlayerController::MakeRPDialogueIdentityKeyForAutomationTest(
+		TEXT("角色"), TEXT("portrait_b"), TEXT("neutral"));
+	Check(NormalizedRPDialogue == TEXT("角色：\n最终对白") && RPIdentityA != RPIdentityB,
+		TEXT("stream dialogue normalization unifies CRLF/quotes and portrait identity changes cannot reuse the old row"));
+	Check(AAscendPlayerController::ShouldAutoScrollRPStreamForAutomationTest(0.f, 100.f)
+		&& !AAscendPlayerController::ShouldAutoScrollRPStreamForAutomationTest(0.f, 240.f),
+		TEXT("terminal stream follows the end only when the reader was already within the bottom threshold"));
+
+	// UI/HTTP callback order is intentionally not constructed in this headless
+	// commandlet. Keep a small wiring sentinel for the production callbacks, while
+	// the one-shot decisions above exercise the actual gate implementation.
+	FString ControllerNarrativeSource;
+	const bool bControllerSourceLoaded = FFileHelper::LoadFileToString(
+		ControllerNarrativeSource,
+		*(FPaths::ProjectDir() / TEXT("Source/AscendSpire/Core/AscendPlayerController_InfiniteNarrative.cpp")));
+	Check(bControllerSourceLoaded
+		&& ControllerNarrativeSource.Find(TEXT("StartCombatNarrativePrefetch(false)")) != INDEX_NONE
+		&& ControllerNarrativeSource.Find(TEXT("ConsumeCombatNarrativePrefetch()")) != INDEX_NONE
+		&& ControllerNarrativeSource.Find(TEXT("bDiscardCombatNarrativePrefetch")) != INDEX_NONE,
+		TEXT("combat prefetch production wiring retains mode-B start, cached-beat consumption and defeat discard callback"));
+
 	if (bCompositionalParsed && CompositionalBeat.Choices[0].Reward.CreatedCards.Num() == 1)
 	{
 		const FCardData RecoveryCard = CompositionalBeat.Choices[0].Reward.CreatedCards[0];
@@ -1075,6 +1773,134 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 			TEXT("zone composition moves the highest-cost exhausted card to hand and modifies that live instance"));
 	}
 	else Check(false, TEXT("zone composition moves the highest-cost exhausted card to hand and modifies that live instance"));
+
+	// ---------------------------------------------------------------------
+	// Difficulty ledger + run-local cultivation regression
+	// ---------------------------------------------------------------------
+	bool bDifficultyMonotonic = true;
+	bool bTemplateVariationPreserved = false;
+	for (int32 Seed = 0; Seed < 12; ++Seed)
+	{
+		FCombatDifficultyProfile Previous;
+		for (int32 Battle = 1; Battle <= 24; ++Battle)
+		{
+			FEnemyData Template;
+			Template.Id = FString::Printf(TEXT("difficulty_fixture_%d_%d"), Seed, Battle);
+			Template.Name = TEXT("难度测试敌");
+			Template.MaxHP = 8 + ((Seed * 13 + Battle * 7) % 95);
+			Template.Tier = (Battle % 11 == 0) ? TEXT("boss")
+				: ((Battle % 5 == 0) ? TEXT("elite") : TEXT("normal"));
+			FEnemyIntent Attack;
+			Attack.Action = TEXT("attack");
+			Attack.Value = 3 + ((Seed + Battle) % 10);
+			Attack.Weight = 1;
+			Template.Intents.Add(Attack);
+			if ((Seed + Battle) % 3 == 0) Template.Abilities.Add(TEXT("thorns:2"));
+			if ((Seed + Battle) % 4 == 0) Template.Abilities.Add(TEXT("regen:2"));
+			const float TemplateThreat = UCombatEngine::ComputeTemplateThreat({Template});
+			if (Battle == 1) bTemplateVariationPreserved = TemplateThreat > 0.f;
+			const bool bElite = Template.Tier == TEXT("elite");
+			const bool bBoss = Template.Tier == TEXT("boss");
+			const FCombatDifficultyProfile Current = UCombatEngine::BuildDifficultyProfile(
+				Battle, Previous.ThreatScore, Previous.HPScale, Previous.IntentScale,
+				{Template}, bElite, bBoss);
+			FString ProgressionError;
+			bDifficultyMonotonic = bDifficultyMonotonic
+				&& UCombatEngine::ValidateDifficultyProgression(Previous, Current, ProgressionError)
+				&& (Battle == 1 || Current.HPScale >= Previous.HPScale * 1.08f)
+				&& (Battle == 1 || Current.IntentScale >= Previous.IntentScale * 1.05f)
+				&& (Battle == 1 || Current.ThreatScore >= Previous.ThreatScore * 1.08f);
+			Previous = Current;
+		}
+	}
+	Check(bDifficultyMonotonic && bTemplateVariationPreserved,
+		TEXT("difficulty curve is strictly monotonic across varied templates, seeds, elite and Boss steps"));
+
+	FRunState LegacyDefaults;
+	FString LegacyDefaultsError;
+	const bool bLegacyDefaultsValid = FCultivationSystem::Validate(
+		LegacyDefaults.Cultivation, LegacyDefaultsError);
+	Check(LegacyDefaults.BattleSerial == 0
+		&& LegacyDefaults.PreviousBattleThreatScore == 0.f
+		&& LegacyDefaults.PreviousBattleHPScale == 0.f
+		&& LegacyDefaults.PreviousBattleIntentScale == 0.f
+		&& LegacyDefaults.Cultivation.RealmIndex == FCultivationSystem::MinQiRealm
+		&& LegacyDefaults.Cultivation.CultivationPoints == 0
+		&& !LegacyDefaults.Cultivation.bAtBottleneck
+		&& bLegacyDefaultsValid,
+		TEXT("new difficulty and cultivation fields have safe defaults for old saves"));
+
+	FCultivationState CultivationFixture;
+	FCultivationSystem::Initialize(CultivationFixture);
+	const bool bChoiceBlockedBeforeVictory = !FCultivationSystem::ApplyChoice(
+		CultivationFixture, ECultivationChoice::Insight).bApplied;
+	bool bVictoryCultivationApplied = true;
+	for (int32 VictoryIndex = 0; VictoryIndex < 20 && !CultivationFixture.bAtBottleneck; ++VictoryIndex)
+	{
+		const FCultivationVictoryResult Victory = FCultivationSystem::GrantCultivationFromVictory(
+			CultivationFixture, 120.f);
+		bVictoryCultivationApplied = bVictoryCultivationApplied && Victory.bApplied
+			&& Victory.CultivationGained > 0;
+		while (CultivationFixture.PendingChoiceCount > 0)
+		{
+			const ECultivationChoice Choice = CultivationFixture.PendingChoiceCount % 3 == 0
+				? ECultivationChoice::BodyTempering
+				: (CultivationFixture.PendingChoiceCount % 3 == 1
+					? ECultivationChoice::QiAbsorption : ECultivationChoice::Insight);
+			bVictoryCultivationApplied = bVictoryCultivationApplied
+				&& FCultivationSystem::ApplyChoice(CultivationFixture, Choice).bApplied;
+		}
+	}
+	FString CultivationError;
+	const bool bReachedBottleneck = CultivationFixture.RealmIndex == FCultivationSystem::MaxQiRealm
+		&& CultivationFixture.bAtBottleneck
+		&& CultivationFixture.CultivationPoints >= FCultivationSystem::GetRealmThreshold(
+			FCultivationSystem::MaxQiRealm);
+	const bool bPrematureBreakthroughRejected = !FCultivationSystem::TryBreakthroughAfterBoss(
+		CultivationFixture, CultivationError);
+	FString BossMessage;
+	const bool bBossBreakthrough = FCultivationSystem::MarkBossDefeated(CultivationFixture, BossMessage)
+		&& CultivationFixture.bFoundationEstablished
+		&& CultivationFixture.RealmIndex == FCultivationSystem::FoundationRealm
+		&& FCultivationSystem::IsFoundation(CultivationFixture);
+	Check(bChoiceBlockedBeforeVictory && bVictoryCultivationApplied
+		&& CultivationFixture.TotalCultivationFromVictories > 0
+		&& bReachedBottleneck && bPrematureBreakthroughRejected
+		&& bBossBreakthrough && FCultivationSystem::Validate(CultivationFixture, CultivationError),
+		TEXT("cultivation choices cross Qi 1-9 thresholds, stop at bottleneck, and establish Foundation only after Boss"));
+
+	URunManager* DifficultyRun = NewObject<URunManager>();
+	const bool bDifficultyRunStarted = DifficultyRun->StartNewRun(20260902);
+	const FCombatDifficultyProfile RunProfileA = bDifficultyRunStarted
+		? DifficultyRun->BeginCombatDifficulty({TEXT("mountain_imp")}, EMapNodeType::Combat)
+		: FCombatDifficultyProfile();
+	const int32 SerialAfterFirst = DifficultyRun->State.BattleSerial;
+	const float ThreatAfterFirst = DifficultyRun->State.PreviousBattleThreatScore;
+	const FCombatDifficultyProfile RunProfileB = bDifficultyRunStarted
+		? DifficultyRun->BeginCombatDifficulty({TEXT("mountain_imp")}, EMapNodeType::Elite)
+		: FCombatDifficultyProfile();
+	// Simulate a failed attempt without writing the commandlet's fixture to the
+	// player's meta-save; the ledger itself must remain untouched by defeat.
+	const int32 SerialBeforeFailure = DifficultyRun->State.BattleSerial;
+	const float ThreatBeforeFailure = DifficultyRun->State.PreviousBattleThreatScore;
+	DifficultyRun->State.bRunActive = false;
+	UCombatEngine* ProfileCombat = NewObject<UCombatEngine>();
+	const bool bProfileCombatStarted = bDifficultyRunStarted
+		&& ProfileCombat->StartCombatWithDifficulty(DifficultyRun->State.Deck,
+			{TEXT("mountain_imp")}, DifficultyRun->State.RelicIds,
+			DifficultyRun->State.MaxHP, DifficultyRun->State.HP, 0, 20260903, RunProfileB);
+	Check(bDifficultyRunStarted && RunProfileA.BattleSerial == 1
+		&& RunProfileB.BattleSerial == SerialAfterFirst + 1
+		&& RunProfileB.ThreatScore > ThreatAfterFirst
+		&& SerialBeforeFailure == RunProfileB.BattleSerial
+		&& ThreatBeforeFailure == RunProfileB.ThreatScore
+		&& DifficultyRun->State.BattleSerial == SerialBeforeFailure
+		&& DifficultyRun->State.PreviousBattleThreatScore == ThreatBeforeFailure
+		&& bProfileCombatStarted
+		&& ProfileCombat->DifficultyProfile.BattleSerial == RunProfileB.BattleSerial
+		&& ProfileCombat->DifficultyProfile.HPScale == RunProfileB.HPScale
+		&& ProfileCombat->Enemies.Num() == 1 && ProfileCombat->Enemies[0].State.MaxHP > 0,
+		TEXT("run difficulty serial persists, rises through an elite step, and is not lowered by defeat"));
 
 	if (bCompositionalParsed && CompositionalBeat.Choices[1].Reward.CreatedCards.Num() == 1)
 	{
@@ -1105,6 +1931,256 @@ int32 UAscendOriginalCardTestCommandlet::Main(const FString& Params)
 			TEXT("combat-local variable threshold fires once after three matching event tags and copies last played card"));
 	}
 	else Check(false, TEXT("combat-local variable threshold fires once after three matching event tags and copies last played card"));
+
+	// ---------------------------------------------------------------------
+	// Authoritative combat damage regression
+	//
+	// These fixtures intentionally go through StartCombat -> StartPlayerTurn ->
+	// PlayCard -> DealDamageToEnemy.  They do not call a parallel preview helper,
+	// so a passing result proves the actual settlement path rather than only the
+	// arithmetic in a test-side replica.  Strength is an additive per-hit value;
+	// explicit card multipliers/repeats remain separate mechanics.
+	// ---------------------------------------------------------------------
+	{
+		FEnemyData DamageRegressionEnemyA;
+		DamageRegressionEnemyA.Id = TEXT("combat_regression_enemy_a");
+		DamageRegressionEnemyA.Name = TEXT("伤害回归敌甲");
+		DamageRegressionEnemyA.MaxHP = 200;
+		DamageRegressionEnemyA.Tier = TEXT("normal");
+		FEnemyData DamageRegressionEnemyB = DamageRegressionEnemyA;
+		DamageRegressionEnemyB.Id = TEXT("combat_regression_enemy_b");
+		DamageRegressionEnemyB.Name = TEXT("伤害回归敌乙");
+		const TArray<FEnemyData> DamageRegressionEnemies = {
+			DamageRegressionEnemyA, DamageRegressionEnemyB};
+
+		auto StartDamageRegressionCombat =
+			[&DamageRegressionEnemies](const TArray<FDeckCard>& Deck,
+				const TArray<FCardData>& RuntimeCards, const TArray<FString>& EnemyIds,
+				int32 Seed) -> UCombatEngine*
+		{
+			UCombatEngine* Fixture = NewObject<UCombatEngine>();
+			Fixture->RegisterRuntimeEnemies(DamageRegressionEnemies);
+			Fixture->RegisterRuntimePlayerContent(RuntimeCards, {});
+			return Fixture->StartCombat(Deck, EnemyIds, {}, 100, 100, 0, Seed, 0)
+				? Fixture : nullptr;
+		};
+		auto AddRegressionCard = [](const TCHAR* Id, const TCHAR* Name,
+			const TCHAR* Action, int32 Value, const TCHAR* Target, int32 Times = 1)
+		{
+			FCardData Card;
+			Card.Id = Id;
+			Card.Name = Name;
+			Card.Type = TEXT("zhaoshi");
+			Card.Class = TEXT("sword");
+			Card.Rarity = TEXT("common");
+			Card.Cost = 0;
+			FCardEffect Effect;
+			Effect.Action = Action;
+			Effect.Value = Value;
+			Effect.Target = Target;
+			Effect.Times = Times;
+			Card.Effects.Add(Effect);
+			return Card;
+		};
+		auto DeckFor = [](const FString& CardId)
+		{
+			FDeckCard DeckCard;
+			DeckCard.CardId = CardId;
+			return TArray<FDeckCard>{DeckCard};
+		};
+		auto FindAndPlay = [](UCombatEngine* Fixture, const FString& CardId,
+			int32 TargetEnemyIndex = 0)
+		{
+			if (!Fixture) return false;
+			const int32 HandIndex = Fixture->Hand.IndexOfByPredicate(
+				[&CardId](const FCardInstance& Card) { return Card.Data.Id == CardId; });
+			return HandIndex != INDEX_NONE && Fixture->PlayCard(HandIndex, TargetEnemyIndex);
+		};
+
+		const FCardData FlatDamageCard = AddRegressionCard(
+			TEXT("combat_regression_flat_damage"), TEXT("平直伤害"),
+			TEXT("damage"), 10, TEXT("enemy"));
+		const FString EnemyAId = DamageRegressionEnemyA.Id;
+		const FString EnemyBId = DamageRegressionEnemyB.Id;
+
+		UCombatEngine* ZeroStrengthCombat = StartDamageRegressionCombat(
+			DeckFor(FlatDamageCard.Id), {FlatDamageCard}, {EnemyAId}, 20260920);
+		const int32 ZeroStrengthBefore = ZeroStrengthCombat && ZeroStrengthCombat->Enemies.Num() == 1
+			? ZeroStrengthCombat->Enemies[0].State.HP : 0;
+		const bool bZeroStrengthPlayed = FindAndPlay(ZeroStrengthCombat, FlatDamageCard.Id);
+		Check(bZeroStrengthPlayed && ZeroStrengthCombat->Enemies[0].State.HP == ZeroStrengthBefore - 10
+			&& ZeroStrengthCombat->EnemyDamageEvents.Num() == 1
+			&& ZeroStrengthCombat->EnemyDamageEvents[0].Damage == 10,
+			TEXT("combat damage baseline applies zero Strength as exactly the authored 10 damage"));
+
+		UCombatEngine* FlatStrengthCombat = StartDamageRegressionCombat(
+			DeckFor(FlatDamageCard.Id), {FlatDamageCard}, {EnemyAId}, 20260921);
+		if (FlatStrengthCombat) FlatStrengthCombat->Player.AddStatus(TEXT("strength"), 3);
+		const int32 FlatStrengthBefore = FlatStrengthCombat && FlatStrengthCombat->Enemies.Num() == 1
+			? FlatStrengthCombat->Enemies[0].State.HP : 0;
+		const bool bFlatStrengthPlayed = FindAndPlay(FlatStrengthCombat, FlatDamageCard.Id);
+		Check(bFlatStrengthPlayed && FlatStrengthCombat->Enemies[0].State.HP == FlatStrengthBefore - 13
+			&& FlatStrengthCombat->EnemyDamageEvents.Num() == 1
+			&& FlatStrengthCombat->EnemyDamageEvents[0].Damage == 13,
+			TEXT("one attack segment resolves 10 base plus 3 flat Strength exactly once (13)"));
+
+		const FCardData MultiHitCard = AddRegressionCard(
+			TEXT("combat_regression_multi_hit"), TEXT("三段伤害"),
+			TEXT("damage"), 10, TEXT("enemy"), 3);
+		UCombatEngine* MultiHitCombat = StartDamageRegressionCombat(
+			DeckFor(MultiHitCard.Id), {MultiHitCard}, {EnemyAId}, 20260922);
+		if (MultiHitCombat) MultiHitCombat->Player.AddStatus(TEXT("strength"), 3);
+		const int32 MultiHitBefore = MultiHitCombat && MultiHitCombat->Enemies.Num() == 1
+			? MultiHitCombat->Enemies[0].State.HP : 0;
+		const bool bMultiHitPlayed = FindAndPlay(MultiHitCombat, MultiHitCard.Id);
+		bool bEveryMultiHitIsFlat = bMultiHitPlayed && MultiHitCombat->EnemyDamageEvents.Num() == 3;
+		if (bEveryMultiHitIsFlat)
+		{
+			for (const FEnemyDamageEvent& Event : MultiHitCombat->EnemyDamageEvents)
+				bEveryMultiHitIsFlat = bEveryMultiHitIsFlat && Event.EnemyIndex == 0 && Event.Damage == 13;
+		}
+		Check(bEveryMultiHitIsFlat && MultiHitCombat->Enemies[0].State.HP == MultiHitBefore - 39,
+			TEXT("three attack segments each add Strength once: (10+3) x 3 = 39"));
+
+		const FCardData AreaDamageCard = AddRegressionCard(
+			TEXT("combat_regression_area_damage"), TEXT("双目标伤害"),
+			TEXT("damage_all"), 10, TEXT("all_enemies"));
+		UCombatEngine* MultiTargetCombat = StartDamageRegressionCombat(
+			DeckFor(AreaDamageCard.Id), {AreaDamageCard}, {EnemyAId, EnemyBId}, 20260923);
+		if (MultiTargetCombat) MultiTargetCombat->Player.AddStatus(TEXT("strength"), 3);
+		const int32 MultiTargetBeforeA = MultiTargetCombat && MultiTargetCombat->Enemies.Num() == 2
+			? MultiTargetCombat->Enemies[0].State.HP : 0;
+		const int32 MultiTargetBeforeB = MultiTargetCombat && MultiTargetCombat->Enemies.Num() == 2
+			? MultiTargetCombat->Enemies[1].State.HP : 0;
+		const bool bMultiTargetPlayed = FindAndPlay(MultiTargetCombat, AreaDamageCard.Id);
+		bool bMultiTargetEvents = bMultiTargetPlayed && MultiTargetCombat->EnemyDamageEvents.Num() == 2;
+		if (bMultiTargetEvents)
+		{
+			for (const FEnemyDamageEvent& Event : MultiTargetCombat->EnemyDamageEvents)
+				bMultiTargetEvents = bMultiTargetEvents && Event.Damage == 13;
+		}
+		Check(bMultiTargetEvents && MultiTargetCombat->Enemies[0].State.HP == MultiTargetBeforeA - 13
+			&& MultiTargetCombat->Enemies[1].State.HP == MultiTargetBeforeB - 13,
+			TEXT("multi-target settlement applies the same flat Strength contribution independently to each enemy"));
+
+		// A 30-point One Sword strike is intentionally synthetic: it isolates the
+		// special strike action from its current card data while checking the exact
+		// acceptance example 30 + Strength 3 = 33.
+		const FCardData OneSwordThirtyCard = AddRegressionCard(
+			TEXT("combat_regression_one_sword_thirty"), TEXT("一剑三十"),
+			TEXT("one_sword_strike"), 30, TEXT("all_enemies"));
+		UCombatEngine* OneSwordThirtyCombat = StartDamageRegressionCombat(
+			DeckFor(OneSwordThirtyCard.Id), {OneSwordThirtyCard}, {EnemyAId}, 20260924);
+		if (OneSwordThirtyCombat) OneSwordThirtyCombat->Player.AddStatus(TEXT("strength"), 3);
+		const int32 OneSwordThirtyBefore = OneSwordThirtyCombat && OneSwordThirtyCombat->Enemies.Num() == 1
+			? OneSwordThirtyCombat->Enemies[0].State.HP : 0;
+		const bool bOneSwordThirtyPlayed = FindAndPlay(OneSwordThirtyCombat, OneSwordThirtyCard.Id);
+		Check(bOneSwordThirtyPlayed && OneSwordThirtyCombat->Enemies[0].State.HP == OneSwordThirtyBefore - 33
+			&& OneSwordThirtyCombat->EnemyDamageEvents.Num() == 1
+			&& OneSwordThirtyCombat->EnemyDamageEvents[0].Damage == 33,
+			TEXT("One Sword's already-computed 30 damage receives Strength +3 once, not as a multiplier (33)"));
+
+		const FCardData OneSwordEnhancerCard = AddRegressionCard(
+			TEXT("combat_regression_one_sword_enhancer"), TEXT("一剑强化测试"),
+			TEXT("enhance_one_sword"), 2, TEXT("one_sword"));
+		const FCardData OneSwordMultiplierCard = AddRegressionCard(
+			TEXT("combat_regression_one_sword_multiplier"), TEXT("一剑重复测试"),
+			TEXT("one_sword_multiply"), 0, TEXT("one_sword"));
+		TArray<FDeckCard> OneSwordEnhanceDeck = DeckFor(OneSwordEnhancerCard.Id);
+		FDeckCard OneSwordEnhanceSwordDeckCard;
+		OneSwordEnhanceSwordDeckCard.CardId = TEXT("one_sword");
+		OneSwordEnhanceDeck.Add(OneSwordEnhanceSwordDeckCard);
+		UCombatEngine* OneSwordEnhanceCombat = StartDamageRegressionCombat(
+			OneSwordEnhanceDeck, {OneSwordEnhancerCard}, {EnemyAId}, 20260925);
+		if (OneSwordEnhanceCombat) OneSwordEnhanceCombat->Player.AddStatus(TEXT("strength"), 3);
+		const bool bEnhancerPlayed = FindAndPlay(OneSwordEnhanceCombat, OneSwordEnhancerCard.Id);
+		const int32 OneSwordEnhanceBefore = OneSwordEnhanceCombat && OneSwordEnhanceCombat->Enemies.Num() == 1
+			? OneSwordEnhanceCombat->Enemies[0].State.HP : 0;
+		const bool bOneSwordPlayed = bEnhancerPlayed && FindAndPlay(OneSwordEnhanceCombat, TEXT("one_sword"));
+		Check(bOneSwordPlayed && OneSwordEnhanceCombat->GetOneSwordEnhance() == 2
+			&& OneSwordEnhanceCombat->GetOneSwordDamage() == 14
+			&& OneSwordEnhanceCombat->Enemies[0].State.HP == OneSwordEnhanceBefore - 17
+			&& OneSwordEnhanceCombat->EnemyDamageEvents.Num() == 1
+			&& OneSwordEnhanceCombat->EnemyDamageEvents[0].Damage == 17,
+			TEXT("current One Sword contract uses base 8 + enhancement 2x3, then adds Strength 3 once (17)"));
+
+		// Reusing an engine for a later encounter must not treat a prior combat's
+		// enhancement ledger as a new multiplier or flat bonus.
+		UCombatEngine* ReusedOneSwordCombat = OneSwordEnhanceCombat;
+		const bool bReusedCombatStarted = ReusedOneSwordCombat
+			&& ReusedOneSwordCombat->StartCombat(DeckFor(FString(TEXT("one_sword"))), {EnemyAId}, {},
+				100, 100, 0, 20260927, 0);
+		Check(bReusedCombatStarted && ReusedOneSwordCombat->GetOneSwordEnhance() == 0
+			&& ReusedOneSwordCombat->GetOneSwordDamage() == 8,
+			TEXT("starting a new combat clears the prior One Sword enhancement ledger"));
+
+		TArray<FDeckCard> OneSwordRepeatDeck = DeckFor(OneSwordMultiplierCard.Id);
+		FDeckCard OneSwordRepeatEnhanceDeckCard;
+		OneSwordRepeatEnhanceDeckCard.CardId = OneSwordEnhancerCard.Id;
+		OneSwordRepeatDeck.Add(OneSwordRepeatEnhanceDeckCard);
+		FDeckCard OneSwordRepeatSwordDeckCard;
+		OneSwordRepeatSwordDeckCard.CardId = TEXT("one_sword");
+		OneSwordRepeatDeck.Add(OneSwordRepeatSwordDeckCard);
+		UCombatEngine* OneSwordRepeatCombat = StartDamageRegressionCombat(
+			OneSwordRepeatDeck, {OneSwordMultiplierCard, OneSwordEnhancerCard}, {EnemyAId}, 20260926);
+		if (OneSwordRepeatCombat) OneSwordRepeatCombat->Player.AddStatus(TEXT("strength"), 3);
+		const bool bMultiplierPlayed = FindAndPlay(OneSwordRepeatCombat, OneSwordMultiplierCard.Id);
+		const bool bRepeatEnhancerPlayed = bMultiplierPlayed
+			&& FindAndPlay(OneSwordRepeatCombat, OneSwordEnhancerCard.Id);
+		const int32 OneSwordRepeatBefore = OneSwordRepeatCombat && OneSwordRepeatCombat->Enemies.Num() == 1
+			? OneSwordRepeatCombat->Enemies[0].State.HP : 0;
+		const bool bRepeatedOneSwordPlayed = bRepeatEnhancerPlayed
+			&& FindAndPlay(OneSwordRepeatCombat, TEXT("one_sword"));
+		bool bRepeatedEventsAreIndependent = bRepeatedOneSwordPlayed
+			&& OneSwordRepeatCombat->EnemyDamageEvents.Num() == 2;
+		if (bRepeatedEventsAreIndependent)
+		{
+			for (const FEnemyDamageEvent& Event : OneSwordRepeatCombat->EnemyDamageEvents)
+				bRepeatedEventsAreIndependent = bRepeatedEventsAreIndependent && Event.Damage == 17;
+		}
+		Check(bRepeatedEventsAreIndependent && OneSwordRepeatCombat->Enemies[0].State.HP == OneSwordRepeatBefore - 34,
+			TEXT("explicit One Sword repeat remains two independent 17-damage hits without multiplying Strength"));
+
+		FStatusInstance NegativeStrength;
+		NegativeStrength.Id = TEXT("strength");
+		NegativeStrength.Stacks = -2;
+		UCombatEngine* NegativeStrengthCombat = StartDamageRegressionCombat(
+			DeckFor(FlatDamageCard.Id), {FlatDamageCard}, {EnemyAId}, 20260928);
+		if (NegativeStrengthCombat) NegativeStrengthCombat->Player.Statuses.Add(NegativeStrength);
+		const bool bNegativeStrengthPlayed = FindAndPlay(NegativeStrengthCombat, FlatDamageCard.Id);
+		Check(bNegativeStrengthPlayed && NegativeStrengthCombat->EnemyDamageEvents.Num() == 1
+			&& NegativeStrengthCombat->EnemyDamageEvents[0].Damage == 8,
+			TEXT("negative Strength remains an additive -2 edge state (10 + -2 = 8)"));
+
+		UCombatEngine* IndependentModifierCombat = StartDamageRegressionCombat(
+			DeckFor(FlatDamageCard.Id), {FlatDamageCard}, {EnemyAId}, 20260929);
+		if (IndependentModifierCombat)
+		{
+			IndependentModifierCombat->Player.Statuses.Add(NegativeStrength);
+			FStatusInstance WeakStatus;
+			WeakStatus.Id = TEXT("weak");
+			WeakStatus.Stacks = 1;
+			IndependentModifierCombat->Player.Statuses.Add(WeakStatus);
+			FStatusInstance VulnerableStatus;
+			VulnerableStatus.Id = TEXT("vulnerable");
+			VulnerableStatus.Stacks = 1;
+			if (IndependentModifierCombat->Enemies.Num() == 1)
+				IndependentModifierCombat->Enemies[0].State.Statuses.Add(VulnerableStatus);
+		}
+		const bool bIndependentModifierPlayed = FindAndPlay(IndependentModifierCombat, FlatDamageCard.Id);
+		Check(bIndependentModifierPlayed && IndependentModifierCombat->EnemyDamageEvents.Num() == 1
+			&& IndependentModifierCombat->EnemyDamageEvents[0].Damage == 9,
+			TEXT("negative Strength plus weak/vulnerable keeps independent modifier order: floor((10-2)*0.75*1.5) = 9"));
+	}
+
+	RunNarrativeGuidanceRegressionTests([&Check](bool bOk, const FString& Label)
+	{
+		Check(bOk, *Label);
+	});
+	RunOpeningRelicRandomRegressionTests([&Check](bool bOk, const FString& Label)
+	{
+		Check(bOk, *Label);
+	});
 
 	UE_LOG(LogTemp, Display, TEXT("========== RESULT: %d passed, %d failed =========="), Passed, Failed);
 	return Failed == 0 ? 0 : 1;

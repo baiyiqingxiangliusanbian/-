@@ -7,6 +7,12 @@ struct FNarrativePromptMessage
 {
 	FString Role = TEXT("system");
 	FString Content;
+	/** Provider-specific hidden continuation channel. It is request-local and never history. */
+	FString ReasoningContent;
+	/** Marks an injected continuation so diagnostics and future adapters can omit it from saves. */
+	bool bTemporary = false;
+	/** Engine facts and the output contract are never candidates for context trimming. */
+	bool bProtected = false;
 };
 
 /** SillyTavern-compatible prompt entry subset used by AscendSpire. */
@@ -58,7 +64,29 @@ struct FNarrativePromptBuildContext
 	TMap<FString, FString> Macros;
 	TArray<FNarrativePromptMessage> ChatHistory;
 	FString WorldBookJson;
+	/** Optional SillyTavern character_book merged only for this request. */
+	FString EmbeddedWorldBookJson;
 	FString CharacterRegistryJson;
+	/** Imported character-card fields are kept separate from the portrait registry. */
+	FString CharacterCardPrompt;
+	/** User-authored direction. This is a permanent system block and survives trimming. */
+	FString StoryDirection;
+	bool bStoryDirectionEnabled = true;
+	/** Writer format repair appends the one authoritative direction block after its user suffix. */
+	bool bWriterFormatRetry = false;
+	/** Explicit UI consent gate for imported card/worldbook/reasoning content. */
+	bool bAllowExternalNarrativeContent = false;
+	/** Local engine facts are higher priority than story direction and external assets. */
+	FString EngineFacts;
+	/** A provider-returned reasoning continuation may be pre-injected for this request only. */
+	FString TemporaryReasoningContent;
+	bool bAllowTemporaryReasoningPreInjection = false;
+	/** User-authored reasoning prefill for the writer only; it is never added to history. */
+	FString ReasoningPrefill;
+	bool bReasoningPrefillEnabled = false;
+	/** Prepended to each copied user history message; never persisted to the real history. */
+	FString UserHistoryMarker = TEXT("[继续遵循既定角色,关系与写作要求,直接回应本条消息]");
+	bool bUserHistoryMarkerEnabled = true;
 	FString AuthorNote;
 	FString GameState;
 	FString CombatContext;
@@ -113,6 +141,7 @@ private:
 	static FString JoinWorldInfoAtPosition(const TArray<FWorldInfoEntry>& Entries, const FString& Position);
 	static FString ResolveMarker(const FString& Identifier, const FNarrativePromptBuildContext& Context,
 		const TArray<FWorldInfoEntry>& WorldInfo);
+	static FString BuildWriterFormattingGuidance();
 	static void InsertInChat(TArray<FNarrativePromptMessage>& History,
 		const FNarrativePromptMessage& Message, int32 Depth);
 };

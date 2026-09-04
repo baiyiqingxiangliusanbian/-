@@ -40,12 +40,18 @@ void UClickProxy::HandleHovered()
 	if (!Owner.IsValid()) return;
 	if (Tag == TEXT("hand_hover") && BoundButton)
 	{
+		Owner->PlayAudioEvent(TEXT("ui_hover"), 0.24f);
 		// 直接放大扇形手牌中的原牌，不再创建第二张预览牌。
 		Owner->ShowCardPreview(Index);
 	}
 	else if (Tag == TEXT("relic_hover"))
 	{
+		Owner->PlayAudioEvent(TEXT("ui_hover"), 0.22f);
 		Owner->ShowRelicTooltipByIndex(Index);
+	}
+	else if (Tag == TEXT("button_hover"))
+	{
+		Owner->PlayAudioEvent(TEXT("ui_hover"), 0.32f);
 	}
 }
 

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "name": "局内修炼规则",
+  "description": "修为只在本局内成长；炼气一至九层后进入瓶颈，最终首领战后方可筑基。",
+  "realms": [
+    { "index": 1, "name": "炼气一层", "threshold": 0 },
+    { "index": 2, "name": "炼气二层", "threshold": 100 },
+    { "index": 3, "name": "炼气三层", "threshold": 225 },
+    { "index": 4, "name": "炼气四层", "threshold": 375 },
+    { "index": 5, "name": "炼气五层", "threshold": 550 },
+    { "index": 6, "name": "炼气六层", "threshold": 750 },
+    { "index": 7, "name": "炼气七层", "threshold": 975 },
+    { "index": 8, "name": "炼气八层", "threshold": 1225 },
+    { "index": 9, "name": "炼气九层·瓶颈", "threshold": 1500 },
+    { "index": 10, "name": "筑基期", "threshold": null, "requires": "boss_after_bottleneck" }
+  ],
+  "choices": [
+    {
+      "id": "body_tempering",
+      "name": "锻体",
+      "cultivation": 0,
+
+      "trigger": "realm_upgrade",
+      "max_hp": 2,
+      "cap": 18,
+      "description": "磨炼筋骨，获得少量气血上限；不直接提高卡牌伤害。"
+    },
+    {
+      "id": "qi_absorption",
+      "name": "纳气",
+      "cultivation": 0,
+
+      "trigger": "realm_upgrade",
+      "qi_reserve": 1,
+      "cap": 3,
+      "description": "引灵入体，积攒有限灵气储备；不替代牌组构筑。"
+    },
+    {
+      "id": "insight",
+      "name": "悟法",
+      "cultivation": 0,
+
+      "trigger": "realm_upgrade",
+      "insight_charge": 1,
+      "cap": 3,
+      "description": "参悟术理，积攒有限悟法次数；不直接赋予高额战斗倍率。"
+    }
+  ]
+}

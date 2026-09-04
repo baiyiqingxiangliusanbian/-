@@ -104,6 +104,15 @@ namespace
 				Out.Add(Item.Left(160));
 		}
 	}
+
+	bool IsAuthoredOpeningIndexAndId(int32 OpeningIndex, const FString& OpeningId)
+	{
+		static const TCHAR* const OpeningIds[] = {
+			TEXT("qinghe_spirit_stone"), TEXT("lingpan_last_chime"), TEXT("ancestral_house_lamp"),
+			TEXT("third_furnace_watch"), TEXT("father_debt_box")};
+		return OpeningIndex >= 0 && OpeningIndex < UE_ARRAY_COUNT(OpeningIds)
+			&& OpeningId == OpeningIds[OpeningIndex];
+	}
 }
 
 void URunManager::Log(const FString& Msg) const
@@ -367,6 +376,109 @@ TArray<FString> URunManager::ConsumeGainNotifications()
 	return Result;
 }
 
+FCombatDifficultyProfile URunManager::BeginCombatDifficulty(const TArray<FString>& EnemyIds,
+	EMapNodeType NodeType)
+{
+	FCombatDifficultyProfile Profile;
+	if (!State.bRunActive)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Run] 运行已结束，拒绝创建新的战斗难度档案"));
+		return Profile;
+	}
+
+	TArray<FEnemyData> Templates;
+	bool bElite = NodeType == EMapNodeType::Elite;
+	bool bBoss = NodeType == EMapNodeType::Boss;
+	for (const FString& EnemyId : EnemyIds)
+	{
+		if (const FEnemyData* Enemy = EnemyTable.Find(EnemyId))
+		{
+			Templates.Add(*Enemy);
+			bElite = bElite || Enemy->Tier == TEXT("elite");
+			bBoss = bBoss || Enemy->Tier == TEXT("boss");
+		}
+	}
+
+	const int32 NextSerial = FMath::Max(1, State.BattleSerial + 1);
+	Profile = UCombatEngine::BuildDifficultyProfile(NextSerial,
+		State.PreviousBattleThreatScore, State.PreviousBattleHPScale,
+		State.PreviousBattleIntentScale, Templates, bElite, bBoss);
+
+	// The serial and all profile outputs are written before combat starts.  A
+	// failed battle therefore leaves a higher ledger in memory/save instead of
+	// allowing a retry or later encounter to become easier.
+	State.BattleSerial = Profile.BattleSerial;
+	State.PreviousBattleThreatScore = Profile.ThreatScore;
+	State.PreviousBattleHPScale = Profile.HPScale;
+	State.PreviousBattleIntentScale = Profile.IntentScale;
+	State.PreviousBattleTier = Profile.Tier;
+	State.PreviousBattleDifficultyStep = Profile.DifficultyStep;
+	LastCombatDifficulty = Profile;
+
+	Log(FString::Printf(TEXT("难度档案 #%d：%s台阶%d，HP×%.3f，意图×%.3f，威胁 %.2f"),
+		Profile.BattleSerial, *Profile.Tier, Profile.DifficultyStep,
+		Profile.HPScale, Profile.IntentScale, Profile.ThreatScore));
+	return Profile;
+}
+
+FCultivationVictoryResult URunManager::GrantCultivationFromVictory(float AuthoritativeThreatScore)
+{
+	FCultivationVictoryResult Result;
+	if (LastCombatDifficulty.BattleSerial <= 0)
+	{
+		Result.ThreatScore = FMath::Max(0.f, AuthoritativeThreatScore);
+		Result.Summary = TEXT("本场战斗没有绑定权威难度档案，修为未结算。");
+		return Result;
+	}
+	if (State.LastCultivationRewardBattleSerial == LastCombatDifficulty.BattleSerial)
+	{
+		Result.ThreatScore = LastCombatDifficulty.ThreatScore;
+		Result.Summary = TEXT("本场胜利的修为已经结算过。");
+		return Result;
+	}
+
+	const float Threat = LastCombatDifficulty.ThreatScore > 0.f
+		? LastCombatDifficulty.ThreatScore : AuthoritativeThreatScore;
+	Result = FCultivationSystem::GrantCultivationFromVictory(State.Cultivation, Threat);
+	if (Result.bApplied)
+	{
+		State.LastCultivationRewardBattleSerial = LastCombatDifficulty.BattleSerial;
+		SyncCultivationToRunRealm();
+		Log(FString::Printf(TEXT("胜利修炼结算：%s"), *Result.Summary));
+	}
+	return Result;
+}
+
+FCultivationChoiceResult URunManager::ApplyCultivationChoice(ECultivationChoice Choice)
+{
+	const FCultivationChoiceResult Result = FCultivationSystem::ApplyChoice(State.Cultivation, Choice);
+	SyncCultivationToRunRealm();
+	if (Result.bApplied)
+	{
+		if (Result.MaxHPGained > 0)
+		{
+			State.MaxHP += Result.MaxHPGained;
+			State.HP = FMath::Min(State.MaxHP, State.HP + Result.MaxHPGained);
+		}
+		Log(FString::Printf(TEXT("修炼选择【%s】：%s"),
+			*FCultivationSystem::ChoiceName(Choice), *Result.Summary));
+	}
+	else if (!Result.Summary.IsEmpty())
+	{
+		Log(Result.Summary);
+	}
+	return Result;
+}
+
+bool URunManager::TryBreakthroughAfterBoss(FString& OutMessage)
+{
+	const bool bSuccess = FCultivationSystem::TryBreakthroughAfterBoss(State.Cultivation, OutMessage);
+	SyncCultivationToRunRealm();
+	if (bSuccess) Log(FString::Printf(TEXT("修炼突破：%s"), *OutMessage));
+	else if (!OutMessage.IsEmpty()) Log(FString::Printf(TEXT("修炼突破未完成：%s"), *OutMessage));
+	return bSuccess;
+}
+
 bool URunManager::StartNewRun(int32 Seed, bool bInfiniteNarrative)
 {
 	RunSeed = Seed;
@@ -386,20 +498,19 @@ bool URunManager::StartNewRun(int32 Seed, bool bInfiniteNarrative)
 
 	// 初始状态
 	State = FRunState();
+	FCultivationSystem::Initialize(State.Cultivation);
+	SyncCultivationToRunRealm();
+	LastCombatDifficulty = FCombatDifficultyProfile();
 	State.bRunActive = true;
 	State.bInfiniteNarrativeMode = bInfiniteNarrative;
 	State.DynamicCards = PersistentAuthoredCards;
 	State.DynamicRelics = PersistentAuthoredRelics;
 	if (bInfiniteNarrative)
 	{
-		State.RPCurrentAct = TEXT("act_1");
-		State.RPCurrentLocation = TEXT("雨夜破庙");
-		FRPRelationshipState Shen;
-		Shen.CharacterId = TEXT("shen_zhaoli");
-		Shen.DisplayName = TEXT("沈照璃");
-		Shen.Affinity = 5;
-		Shen.Bond = TEXT("ally");
-		State.RPRelationships.Add(Shen);
+		// 人物、关系与地点均由本局随机开局种子交给 writer 生成，
+		// 运行层不再预埋固定女主或旧剧情地点。
+		State.RPCurrentAct = TEXT("opening");
+		State.RPCurrentLocation = TEXT("待生成");
 	}
 
 	TArray<FString> StarterIds;
@@ -826,6 +937,14 @@ FNodeEncounter URunManager::ChooseOption(int32 Index)
 	case EMapNodeType::Elite:
 	case EMapNodeType::Boss:
 		Enc.EnemyIds = Choice.EnemyIds;
+		{
+			const FCombatDifficultyProfile Profile = BeginCombatDifficulty(Enc.EnemyIds, Choice.Type);
+			Enc.BattleSerial = Profile.BattleSerial;
+			Enc.HPScale = Profile.HPScale;
+			Enc.IntentScale = Profile.IntentScale;
+			Enc.ThreatScore = Profile.ThreatScore;
+			Enc.DifficultyTier = Profile.Tier;
+		}
 		LastCombatNodeType = Choice.Type;
 		LastCombatEnemyIds = Choice.EnemyIds;
 		for (const FString& Id : Enc.EnemyIds)
@@ -1521,6 +1640,7 @@ void URunManager::PrepareInfiniteCombat(EMapNodeType NodeType, const TArray<FStr
 	State.HighestFloorThisRun = FMath::Max(State.HighestFloorThisRun, State.CurrentFloor);
 	LastCombatNodeType = NodeType;
 	LastCombatEnemyIds = EnemyIds;
+	BeginCombatDifficulty(EnemyIds, NodeType);
 }
 
 void URunManager::SavePendingInfiniteCombat(EMapNodeType NodeType, const TArray<FEnemyData>& Enemies, int32 EnemyHPBonus,
@@ -1558,6 +1678,12 @@ bool URunManager::RestorePendingInfiniteCombat(FNodeEncounter& OutEncounter, FSt
 		if (!Enemy.Id.IsEmpty()) OutEncounter.EnemyIds.Add(Enemy.Id);
 	if (OutEncounter.EnemyIds.Num() == 0) return false;
 	OutEncounter.EnemyHPBonus = State.PendingInfiniteEnemyHPBonus;
+	OutEncounter.BattleSerial = State.BattleSerial;
+	OutEncounter.HPScale = State.PreviousBattleHPScale;
+	OutEncounter.IntentScale = State.PreviousBattleIntentScale;
+	OutEncounter.ThreatScore = State.PreviousBattleThreatScore;
+	OutEncounter.DifficultyTier = State.PreviousBattleTier.IsEmpty()
+		? TEXT("normal") : State.PreviousBattleTier;
 	OutEncounter.StoryText = PendingEnemies[0].Story;
 	OutResultSummary = State.PendingInfiniteResultSummary;
 	OutRewardCards = State.PendingInfiniteRewardCards;
@@ -1578,12 +1704,101 @@ void URunManager::ClearPendingInfiniteCombat()
 	State.PendingInfiniteRewardRelics.Reset();
 }
 
+void URunManager::SavePendingInfiniteOpening(int32 OpeningIndex, const FString& OpeningId,
+	const TArray<FString>& RelicIds, const TArray<FString>& ChoiceTexts, bool bWordingReady)
+{
+	ClearPendingInfiniteOpening();
+	if (!State.bInfiniteNarrativeMode || !State.bRunActive || OpeningIndex < 0 || OpeningIndex >= 5
+		|| !IsAuthoredOpeningIndexAndId(OpeningIndex, OpeningId) || RelicIds.Num() != 3) return;
+	TSet<FString> UniqueIds;
+	for (const FString& RelicId : RelicIds)
+	{
+		if (RelicId.IsEmpty() || UniqueIds.Contains(RelicId) || !RelicTable.Contains(RelicId)) return;
+		UniqueIds.Add(RelicId);
+	}
+	State.bInfiniteOpeningPending = true;
+	State.PendingInfiniteOpeningIndex = OpeningIndex;
+	State.PendingInfiniteOpeningId = OpeningId.Left(96);
+	State.PendingInfiniteOpeningRelicIds = RelicIds;
+	if (bWordingReady && ChoiceTexts.Num() == 3)
+	{
+		bool bValidTexts = true;
+		for (const FString& Text : ChoiceTexts)
+		{
+			if (Text.TrimStartAndEnd().IsEmpty() || Text.Len() > 800)
+			{
+				bValidTexts = false;
+				break;
+			}
+		}
+		if (bValidTexts)
+		{
+			State.PendingInfiniteOpeningChoiceTexts = ChoiceTexts;
+			State.bInfiniteOpeningWordingReady = true;
+		}
+	}
+}
+
+bool URunManager::HasPendingInfiniteOpening() const
+{
+	return State.bInfiniteNarrativeMode && State.bRunActive && State.bInfiniteOpeningPending;
+}
+
+bool URunManager::RestorePendingInfiniteOpening(int32& OutOpeningIndex, FString& OutOpeningId,
+	TArray<FString>& OutRelicIds, TArray<FString>& OutChoiceTexts, bool& bOutWordingReady) const
+{
+	OutOpeningIndex = INDEX_NONE;
+	OutOpeningId.Reset();
+	OutRelicIds.Reset();
+	OutChoiceTexts.Reset();
+	bOutWordingReady = false;
+	if (!HasPendingInfiniteOpening() || State.PendingInfiniteOpeningIndex < 0
+		|| State.PendingInfiniteOpeningIndex >= 5
+		|| !IsAuthoredOpeningIndexAndId(State.PendingInfiniteOpeningIndex, State.PendingInfiniteOpeningId)
+		|| State.PendingInfiniteOpeningRelicIds.Num() != 3) return false;
+	TSet<FString> UniqueIds;
+	for (const FString& RelicId : State.PendingInfiniteOpeningRelicIds)
+	{
+		if (RelicId.IsEmpty() || UniqueIds.Contains(RelicId) || !RelicTable.Contains(RelicId)) return false;
+		UniqueIds.Add(RelicId);
+	}
+	OutOpeningIndex = State.PendingInfiniteOpeningIndex;
+	OutOpeningId = State.PendingInfiniteOpeningId;
+	OutRelicIds = State.PendingInfiniteOpeningRelicIds;
+	if (State.bInfiniteOpeningWordingReady && State.PendingInfiniteOpeningChoiceTexts.Num() == 3)
+	{
+		bool bValidTexts = true;
+		for (const FString& Text : State.PendingInfiniteOpeningChoiceTexts)
+			if (Text.TrimStartAndEnd().IsEmpty() || Text.Len() > 800) { bValidTexts = false; break; }
+		if (bValidTexts)
+		{
+			OutChoiceTexts = State.PendingInfiniteOpeningChoiceTexts;
+			bOutWordingReady = true;
+		}
+	}
+	return true;
+}
+
+void URunManager::ClearPendingInfiniteOpening()
+{
+	State.bInfiniteOpeningPending = false;
+	State.PendingInfiniteOpeningIndex = INDEX_NONE;
+	State.PendingInfiniteOpeningId.Reset();
+	State.PendingInfiniteOpeningRelicIds.Reset();
+	State.PendingInfiniteOpeningChoiceTexts.Reset();
+	State.bInfiniteOpeningWordingReady = false;
+}
+
 FCombatReward URunManager::ResolveCombatVictory(bool bChoseKillLoot, int32 PlayerRemainingHP, int32 GoldFromCombat)
 {
 	FCombatReward Reward;
 	const EMapNodeType NodeType = LastCombatNodeType;
 
 	State.HP = PlayerRemainingHP;
+	// Cultivation is earned from the engine-owned threat result, not from
+	// repeatedly opening or clicking a cultivation menu.  The serial guard in
+	// GrantCultivationFromVictory keeps reward retries idempotent.
+	GrantCultivationFromVictory(LastCombatDifficulty.ThreatScore);
 
 	// 斩妖图鉴登记（新种类 → 成就）
 	RegisterEnemyKills(LastCombatEnemyIds);
@@ -2227,9 +2442,21 @@ TArray<FString> URunManager::RollInitialRelicChoices(int32 Count)
 	TArray<FString> Pool;
 	for (const auto& Pair : RelicTable)
 	{
-		if (RarityToTier(Pair.Value.Rarity) == 0) Pool.Add(Pair.Key);
+		if (State.RelicIds.Contains(Pair.Key)) continue;
+		if (RarityToTier(Pair.Value.Rarity) == 0) Pool.AddUnique(Pair.Key);
 	}
-	while (Result.Num() < Count && Pool.Num() > 0)
+	// A custom/imported table may have fewer than Count unowned commons. Keep
+	// the same deterministic, non-duplicating API but widen to other unowned
+	// built-ins before returning a short/empty result.
+	if (Pool.Num() < Count)
+	{
+		for (const auto& Pair : RelicTable)
+		{
+			if (State.RelicIds.Contains(Pair.Key)) continue;
+			Pool.AddUnique(Pair.Key);
+		}
+	}
+	while (Result.Num() < FMath::Max(0, Count) && Pool.Num() > 0)
 	{
 		int32 Idx = Rng.RandRange(0, Pool.Num() - 1);
 		Result.Add(Pool[Idx]);
@@ -2287,7 +2514,7 @@ bool URunManager::SaveRun() const
 {
 	// 主结构
 	TSharedPtr<FJsonObject> Root = MakeShareable(new FJsonObject);
-	Root->SetNumberField(TEXT("save_version"), 2);
+	Root->SetNumberField(TEXT("save_version"), 3);
 	Root->SetNumberField(TEXT("seed"), RunSeed);
 
 	// Run 状态（USTRUCT 自动序列化，含 CurrentFloor/ElitePity）
@@ -2352,6 +2579,79 @@ bool URunManager::LoadRun()
 		if (!FJsonObjectConverter::JsonObjectToUStruct(StateJson->ToSharedRef(), &State)) return false;
 	}
 	else return false;
+
+	// v2 and older saves predate the difficulty ledger and cultivation state.
+	// JsonObjectConverter leaves newly-added fields at their struct defaults, but
+	// we explicitly detect absent fields so a malformed/partial save cannot
+	// accidentally inherit values from a reused UObject instance.
+	auto HasStateField = [&StateJson](const TCHAR* Wanted) -> bool
+	{
+		if (!StateJson || !StateJson->IsValid()) return false;
+		return (*StateJson)->HasField(Wanted);
+	};
+	// Opening recovery was added after older saves. Missing or malformed records
+	// are deliberately treated as "no pending opening"; title-continue then follows
+	// the legacy narrative path rather than inventing a relic roll.
+	if (!HasStateField(TEXT("bInfiniteOpeningPending")))
+	{
+		ClearPendingInfiniteOpening();
+	}
+	else if (State.bInfiniteOpeningPending)
+	{
+		int32 PendingOpeningIndex = INDEX_NONE;
+		FString PendingOpeningId;
+		TArray<FString> PendingOpeningRelics;
+		TArray<FString> PendingOpeningTexts;
+		bool bPendingOpeningWordingReady = false;
+		if (!RestorePendingInfiniteOpening(PendingOpeningIndex, PendingOpeningId, PendingOpeningRelics,
+			PendingOpeningTexts, bPendingOpeningWordingReady))
+		{
+			ClearPendingInfiniteOpening();
+		}
+	}
+	if (!HasStateField(TEXT("bInfiniteFreeRPForcedJumpPending")))
+		State.bInfiniteFreeRPForcedJumpPending = false;
+	if (!HasStateField(TEXT("bInfiniteFreeRPForcedJumpAwaitingContinue")))
+		State.bInfiniteFreeRPForcedJumpAwaitingContinue = false;
+	if (!HasStateField(TEXT("infiniteFreeRPForcedDirection")))
+		State.InfiniteFreeRPForcedDirection.Reset();
+	if (!State.bInfiniteFreeRPForcedJumpPending)
+	{
+		State.InfiniteFreeRPForcedDirection.Reset();
+		State.bInfiniteFreeRPForcedJumpAwaitingContinue = false;
+	}
+	if (!HasStateField(TEXT("cultivation")))
+	{
+		FCultivationSystem::Initialize(State.Cultivation);
+		GainNotifications.Add(TEXT("旧存档迁移：修炼状态从炼气一层开始记录"));
+	}
+	else
+	{
+		FString CultivationWarning;
+		FCultivationSystem::Normalize(State.Cultivation, CultivationWarning);
+		if (!CultivationWarning.IsEmpty()) UE_LOG(LogTemp, Warning, TEXT("[Run] %s"), *CultivationWarning);
+	}
+	if (!HasStateField(TEXT("battleSerial"))) State.BattleSerial = 0;
+	if (!HasStateField(TEXT("previousBattleThreatScore"))) State.PreviousBattleThreatScore = 0.f;
+	if (!HasStateField(TEXT("previousBattleHPScale"))) State.PreviousBattleHPScale = 0.f;
+	if (!HasStateField(TEXT("previousBattleIntentScale"))) State.PreviousBattleIntentScale = 0.f;
+	if (!HasStateField(TEXT("previousBattleTier"))) State.PreviousBattleTier = TEXT("none");
+	if (!HasStateField(TEXT("previousBattleDifficultyStep"))) State.PreviousBattleDifficultyStep = 0;
+	if (!HasStateField(TEXT("lastCultivationRewardBattleSerial"))) State.LastCultivationRewardBattleSerial = 0;
+	State.BattleSerial = FMath::Max(0, State.BattleSerial);
+	State.PreviousBattleThreatScore = FMath::Max(0.f, State.PreviousBattleThreatScore);
+	State.PreviousBattleHPScale = FMath::Max(0.f, State.PreviousBattleHPScale);
+	State.PreviousBattleIntentScale = FMath::Max(0.f, State.PreviousBattleIntentScale);
+	State.LastCultivationRewardBattleSerial = FMath::Max(0, State.LastCultivationRewardBattleSerial);
+	LastCombatDifficulty = FCombatDifficultyProfile();
+	LastCombatDifficulty.BattleSerial = State.BattleSerial;
+	LastCombatDifficulty.HPScale = State.PreviousBattleHPScale;
+	LastCombatDifficulty.IntentScale = State.PreviousBattleIntentScale;
+	LastCombatDifficulty.ThreatScore = State.PreviousBattleThreatScore;
+	LastCombatDifficulty.Tier = State.PreviousBattleTier.IsEmpty()
+		? TEXT("normal") : State.PreviousBattleTier;
+	LastCombatDifficulty.DifficultyStep = State.PreviousBattleDifficultyStep;
+	SyncCultivationToRunRealm();
 	for (const FCardData& Card : PersistentAuthoredCards)
 	{
 		if (!State.DynamicCards.ContainsByPredicate([&Card](const FCardData& Existing)
@@ -2427,9 +2727,20 @@ bool URunManager::LoadRun()
 	return true;
 }
 
+void URunManager::SyncCultivationToRunRealm()
+{
+	FString Warning;
+	FCultivationSystem::Normalize(State.Cultivation, Warning);
+	State.Realm = State.Cultivation.RealmName;
+	if (!Warning.IsEmpty()) UE_LOG(LogTemp, Warning, TEXT("[Run] %s"), *Warning);
+}
+
 void URunManager::Breakthrough()
 {
-	State.Realm = TEXT("筑基期");
+	FString BreakthroughMessage;
+	const bool bFoundation = FCultivationSystem::MarkBossDefeated(
+		State.Cultivation, BreakthroughMessage);
+	SyncCultivationToRunRealm();
 	State.MaxHP += 10;
 	State.HP = State.MaxHP;
 	State.bRunVictory = true;
@@ -2438,8 +2749,19 @@ void URunManager::Breakthrough()
 
 	Log(TEXT(""));
 	Log(TEXT("=============================================="));
-	Log(TEXT("  天雷淬体，道基初成！"));
-	Log(TEXT("  恭喜突破至 【筑基期】"));
+	if (bFoundation)
+	{
+		Log(TEXT("  天雷淬体，道基初成！"));
+		Log(TEXT("  恭喜突破至 【筑基期】"));
+	}
+	else
+	{
+		// The legacy finite map has no cultivation-choice screen yet.  Keep its
+		// historical victory result, but do not lie about the cultivation state;
+		// the next UI/narrative layer can call TryBreakthroughAfterBoss once the
+		// bottleneck choices have been supplied.
+		Log(FString::Printf(TEXT("  首领已败，但筑基尚未完成：%s"), *BreakthroughMessage));
+	}
 	Log(FString::Printf(TEXT("  气血上限 +10 (HP %d/%d)"), State.HP, State.MaxHP));
 	Log(TEXT("  （第一章·完 —— 更多境界敬请期待）"));
 	Log(TEXT("=============================================="));

@@ -1,155 +1,70 @@
 {
-  "name": "AscendSpire 原创卡设计世界书",
-  "purpose": "教会模型把已经获得的物品、技艺、地图、情报或异常经历，设计并编译成一张能运行的卡。这里教设计方法，不负责裁决玩家是否真的获得了它。",
-  "workflow": [
-    {
-      "stage": "item_analysis",
-      "instruction": "只看本次 source_fact、concept、mechanic_intent 和 acquisition。用短语提炼：实体材质或形态、真实用途或行为、取得时发生的动作、场景中的危险或情绪意象。地图、暗号、记忆、契约也都是可制成卡的事物。不要引用上一轮卡或上一轮奖励。",
-      "minimum": "找出至少两个能被玩家感受到的特征。不要用‘神秘’‘强大’‘蕴含力量’这类空词代替观察。"
+  "version": 2,
+  "game_identity": "《登仙牌》是修仙题材的单人构筑式卡牌游戏。玩家在剧情中获得事物、功法与见闻，并把它们带入之后的战斗。原创卡不只是一次数值奖励，而应成为玩家会围绕它作决定的玩法工具。",
+  "combat_rules": {
+    "turn": "玩家通常每回合获得3点灵力，抽取手牌并打出可支付费用的牌。回合结束时罡气通常不会永久保留，未保留的手牌进入弃牌堆；抽牌堆耗尽后弃牌堆重新洗回。",
+    "zones": ["hand", "draw", "discard", "exhaust", "last_played"],
+    "resources": {
+      "hp": "跨战斗持续，失去气血是真实代价；治疗与最大气血因此比同量罡气更贵重。",
+      "spirit": "主要出牌资源。额外1点灵力通常足以多打一张牌，必须谨慎。",
+      "block": "主要防御资源，也可被读取、消耗或转化。",
+      "gold": "跨战斗资源，战斗内获得量应很小。"
     },
-    {
-      "stage": "card_plan",
-      "instruction": "先为这张牌写一句玩法身份，例如‘把弃牌堆当作已走过的路线来规划下一抽’。再把分析中的至少两个特征映射到同一机制：食物可立即恢复且会被消耗；带暗礁的地图可从弃牌中选出路线并提供防护；毒针既造成刺伤又留下毒；脆裂镜面可以复制上一张牌但改变手牌节奏。最后按强度表决定费用、品阶、数值、retain/exhaust。",
-      "strength_rule": "common 是清楚可靠的一件事；uncommon 可组合两个协同效果；rare 可改变牌区、资源或形成条件构筑；legendary 才应显著改写一场战斗。副作用必须来自物品本身或取得方式，不能为了显得复杂硬塞。",
-      "creativity_rule": "不要默认写成0费抽1。只有书页、情报、窥视、开路等意象确实对应获取信息时才使用 draw/discover_draw，而且最好与该物件特有的另一机制结合。"
+    "statuses": {
+      "strength": "提高攻击收益，持续战斗。",
+      "dexterity": "提高防御收益，持续战斗。",
+      "weak": "降低目标输出。",
+      "vulnerable": "提高目标承受的伤害。",
+      "burn": "灼烧型持续伤害。",
+      "poison": "中毒型持续伤害。",
+      "nightmare": "梦魇类负面状态。",
+      "temp_strength": "临时力量。"
     },
-    {
-      "stage": "card",
-      "instruction": "把计划翻译成扁平的引擎字段。描述由引擎根据 effects 自动生成，不要编造自然语言代码。一个效果做一件事；多个物品可合成一张具有共同概念的卡。无法逐字实现时，选择最接近意象的已支持钩子，允许这种近似。"
-    }
-  ],
-  "output_contract": {
-    "root": {
-      "design_analysis": {
-        "object_traits": ["2至4个具体短语"],
-        "scene_traits": ["1至3个取得方式或场景短语"],
-        "mechanic_mapping": ["物品特征 -> 游戏行为，2至4条"]
-      },
-      "card_plan": {
-        "gameplay_identity": "一句话",
-        "power_budget": "费用与品阶为何匹配的一句话",
-        "trait_coverage": ["最终效果分别兑现了哪些特征"]
-      },
-      "card": "恰好一个 card 对象"
-    },
-    "card_required": ["name", "rarity", "type", "class", "cost", "flavor", "exhaust", "retain", "effects"],
-    "card_rules": {
-      "name": "18个汉字以内，像真正卡名，不复述完整物品说明",
-      "rarity": ["common", "uncommon", "rare", "legendary"],
-      "type": ["spell", "sword", "body", "talisman", "skill", "gongfa"],
-      "class": ["", "sword", "danxiu", "fuxiu"],
-      "cost": "0至3的整数",
-      "flavor": "64字以内的世界内文字；不得写设计说明、品阶或数值评价",
-      "effects": "1至8个扁平对象；通常1至3个就足够",
-      "upgrade": "可省略；省略时引擎自动强化第一个效果"
-    }
+    "persistent_rules": "非 on_play 效果会在打出卡牌后注册为本场战斗规则，可通过条件、战斗变量与 limit 形成蓄力、转换、回响、记忆和一次性拦截等机制。"
   },
-  "effect_dsl": {
-    "common_fields": {
-      "action": "必须是下列支持动作",
-      "target": ["enemy", "self", "all_enemies", "random_enemy"],
-      "value": "整数基础值。会产生数值的动作必须给正数；transfer 可为0",
-      "times": "默认1，只有 damage 与 damage_random 可按品阶提高",
-      "status": "状态动作使用",
-      "stacks": "状态层数，common/uncommon/rare/legendary 上限分别1/2/3/4",
-      "condition": "可省略；条件应改变决策，不要装饰",
-      "scale_by": "可省略；动态倍率来源",
-      "scale_factor": "使用 scale_by 时必须为正整数",
-      "scale_divisor": "使用 scale_by 时为1至10",
-      "trigger": "省略等于 on_play；持续钩子写对应事件",
-      "duration": ["instant", "turn", "combat"],
-      "source": "transfer 或牌区动作的来源",
-      "destination": "transfer 或牌区动作的目标",
-      "param": "牌区动作的选择器",
-      "consume_source": "transfer 是否消耗来源",
-      "max_triggers": "0表示持续期不限，否则1至99"
-    },
-    "direct_actions": {
-      "damage": "对单体造成伤害",
-      "damage_all": "对全体造成伤害",
-      "damage_random": "随机目标伤害，可与 times 组合",
-      "block": "获得罡气",
-      "heal": "恢复气血",
-      "draw": "抽牌",
-      "discover_draw": "从抽牌堆展示若干张并选1张",
-      "gain_spirit": "本回合获得1灵力",
-      "lose_spirit": "失去灵力",
-      "spirit_next_turn": "下回合获得1灵力",
-      "self_damage": "直接失去气血但不会低于1",
-      "discard_random": "随机弃牌",
-      "discard_hand": "弃掉未保留的整手牌",
-      "gain_gold": "战斗中获得少量灵石",
-      "gain_max_hp": "增加最大气血",
-      "cleanse_toxicity": "清空丹毒"
-    },
-    "status_actions": {
-      "actions": ["apply_status", "remove_status", "set_status", "apply_temp_strength", "damage_per_status", "damage_all_per_status", "block_per_status", "amplify_status"],
-      "statuses": ["strength", "dexterity", "weak", "vulnerable", "burn", "poison", "nightmare", "temp_strength"]
-    },
-    "scaling_actions": ["damage_per_block", "damage_all_per_repeat", "damage_all_per_basic_gongfa", "cost_free_basic_gongfa", "defense_to_strength"],
-    "scale_sources": ["self_block", "missing_hp", "hand_size", "draw_pile", "discard_pile", "cards_played_this_turn", "basic_gongfa_played", "event_value", "self_hp", "self_spirit", "turn", "enemy_count", "exhaust_pile", "last_card_cost", "target_hp", "target_missing_hp", "target_block", "self_status:strength", "target_status:poison", "var:自定义英文标识"],
-    "conditions": ["self_hp_below:50", "self_hp_above:50", "self_has_status:strength", "self_missing_status:poison", "target_has_status:poison", "target_missing_status:weak", "counter_at_least:3", "hand_size_at_least:5", "draw_pile_at_most:3", "discard_pile_at_least:5", "event_tag_is:spell", "source_at_least:var:ink=3"],
-    "zone_actions": {
-      "actions": ["move_cards", "copy_cards", "modify_card_cost", "upgrade_cards", "transform_cards", "shuffle_zone"],
-      "source": ["hand", "draw", "discard", "exhaust", "last_played"],
-      "destination_for_move_or_copy": ["hand", "draw", "draw_top", "draw_random", "discard", "exhaust"],
-      "param": ["any", "random", "highest_cost", "lowest_cost", "upgraded", "non_upgraded", "retained", "exhausting", "type:skill", "rarity:rare", "cost_at_most:1"],
-      "value": "一次选择1至3张",
-      "modify_card_cost": "用 stacks 写费用变化，-3至-1或1至3",
-      "transform_cards": "destination 必须是游戏中已有卡牌名称或ID，拿不准时不要用"
-    },
-    "transfer": {
-      "meaning": "把一个运行时数值写入另一个数值或状态，可表达奇异的资源转化与持续钩子",
-      "sources": ["event_value", "self_block", "self_hp", "self_spirit", "target_block", "target_hp", "self_status:strength", "target_status:poison", "var:英文标识"],
-      "destinations": ["self_block", "self_hp", "self_spirit", "target_block", "target_hp", "self_status:strength", "target_status:poison", "var:英文标识"],
-      "write_mode": ["add", "set", "min", "max", "multiply"],
-      "triggers": ["on_play", "before_gain_block", "after_gain_block", "on_turn_start", "on_turn_end", "on_card_played", "on_damage_dealt", "on_damage_taken", "on_draw", "on_discard", "on_exhaust", "on_reshuffle", "on_kill", "after_spend_spirit", "before_deal_damage", "before_take_damage", "on_status_applied"]
-    }
+  "design_standard": {
+    "theme": "不要求按固定数量拆解物品特征。最终机制应让玩家在不知道设计说明时，也能从玩法感受到这个事物的用途、性质、取得代价或剧情意义。",
+    "gameplay_identity": "一张好牌应提供一个清楚的决策：现在还是以后使用、为它准备什么状态、牺牲什么、回收什么、或如何改变牌序。避免只有多个互不相关的标准效果。",
+    "coherence": "先从剧情决定玩家应当做出什么选择、感受到什么故事，再用必要且彼此服务的效果表达这个核心玩法。不要把效果数量当成设计目标，不要重复同一效果，也不要混入互不相关的状态体系；引用的状态、战斗变量或牌名必须由本牌或当前构筑可靠地产生。升级应强化核心玩法，而不是原样复制。",
+    "readability": "先写出简短明确的预期卡面效果，再实现脚本。玩家必须能快速扫懂基础与升级说明；删去枝节与重复收益，让复杂度来自清晰的事件、条件、倍率或资源转换，而不是堆叠很多短句。",
+    "implementation_fidelity": "intended_text 是精确的效果契约。引擎生成的真实卡面必须逐项实现它，既不能漏掉其中的消耗、目标、状态或收益，也不能擅自增加另一种状态、额外收益或无关代价。机械可运行不等于设计完成；必须看到真实基础与升级卡面后再确认。",
+    "build_relevance": "利用玩家真实构筑判断其短板与协同，但不要机械复制已有牌。可以补足短板、强化体系，也可以提供足够清晰的新方向。",
+    "creativity": "没有现成同名动作不代表无法实现。优先组合事件、条件、动态数值、牌区、资源转化和战斗变量。只有规则语言确实无法表达时才更换设计。",
+    "clarity": "奇特机制也必须能由卡面自动描述清楚。复杂度应服务于一个核心玩法，而不是堆叠字段。"
   },
-  "power_anchors": {
-    "order": ["common", "uncommon", "rare", "legendary"],
-    "damage": [7, 11, 15, 19],
-    "block": [7, 10, 13, 16],
-    "heal": [4, 7, 10, 13],
-    "damage_all": [4, 6, 8, 10],
-    "damage_random": [6, 9, 12, 15],
-    "draw": [1, 1, 2, 2],
-    "discover_draw": [2, 3, 4, 5],
-    "zone_count": [3, 3, 3, 3],
-    "guidance": "这些是每个单项效果的运行上限，不是必须填满的目标。多效果牌应主动降低各项数值或提高费用。"
+  "power_standard": {
+    "rarity_order": ["common", "uncommon", "rare", "legendary"],
+    "cost_roles": {
+      "0": "轻量、条件性、延迟收益或带有真实代价；不能无条件完成一张正常1费牌的全部工作。",
+      "1": "标准行动；通常提供一次可靠收益或一个中等强度机制。",
+      "2": "强力行动、多个协同效果或能改变战斗方向的规则。",
+      "3": "决定性但会占据整回合资源的效果。"
+    },
+    "single_effect_reference": {
+      "damage": [7, 11, 15, 19],
+      "block": [7, 10, 13, 16],
+      "heal": [4, 7, 10, 13],
+      "damage_all": [4, 6, 8, 10],
+      "damage_random": [6, 9, 12, 15],
+      "draw": [1, 1, 2, 2],
+      "discover_draw": [2, 3, 4, 5],
+      "status_stacks": [1, 2, 3, 4]
+    },
+    "interpretation": [
+      "上述数字是对应品阶单个无条件效果的参考上限，不是目标值。",
+      "同一张牌有多个正面效果时，应降低各项数值、提高费用、增加条件或使用 exhaust。",
+      "retain 提高等待合适时机的能力；exhaust 可允许效果更集中，但不能自动抵消任意强度。",
+      "持续触发、复制、减费、获得灵力和按动态资源成长的效果，价值通常高于一次性同数值效果。",
+      "动态数值必须结合当前构筑估算低值、常见值和合理上限；按常见值定价并检查上限。强度不合适时优先调整数值、转化比例、费用、条件、retain/exhaust或触发限制，绝不能添加与核心设计无关的状态、收益或多种代价来凑平衡。",
+      "稀有度表达机制复杂度与奖励价值，不应用来给明显超模的设计寻找更高上限。",
+      "允许有个性、带风险、依赖构筑甚至在某些局面极强；只避免无条件优于同费用同品阶卡和明显失控。"
+    ]
   },
-  "worked_examples": [
-    {
-      "source": "玩家在风雪后分到一块盐渍干饼",
-      "lesson": "干粮能恢复体力；盐和干硬质地也意味着撑住下一击；吃掉后消失。两个特征共同导向一次性续航牌，而不是抽牌。",
-      "card": {"name": "盐渍干饼", "rarity": "common", "type": "skill", "class": "", "cost": 1, "flavor": "咸得发苦，却能让腿脚再撑一程", "exhaust": true, "retain": true, "effects": [{"action": "heal", "target": "self", "value": 4}, {"action": "block", "target": "self", "value": 4}]}
-    },
-    {
-      "source": "从水鬼旧舟下取得一张标有潮汐与暗礁的兽皮水路图",
-      "lesson": "地图不是普通信息奖励。已走过的路对应弃牌堆；预定路线对应抽牌堆顶；兽皮与暗礁提供少量防护。",
-      "card": {"name": "藏潮水图", "rarity": "uncommon", "type": "skill", "class": "", "cost": 1, "flavor": "暗礁随潮声在皮面浮沉", "exhaust": false, "retain": true, "effects": [{"action": "move_cards", "target": "self", "source": "discard", "destination": "draw_top", "param": "highest_cost", "value": 1}, {"action": "block", "target": "self", "value": 5}]}
-    },
-    {
-      "source": "从刺客袖中缴获一匣淬毒飞针",
-      "lesson": "针先刺伤，毒随后残留；数量有限所以 exhaust。伤害与中毒都来自同一物件，而不是随意拼效果。",
-      "card": {"name": "袖底青芒", "rarity": "uncommon", "type": "skill", "class": "", "cost": 1, "flavor": "匣盖一开，腥甜先于寒光抵达", "exhaust": true, "retain": false, "effects": [{"action": "damage", "target": "enemy", "value": 7}, {"action": "apply_status", "target": "enemy", "value": 1, "status": "poison", "stacks": 2}]}
-    },
-    {
-      "source": "捡到一片仍会映出上一个动作的破镜",
-      "lesson": "镜面复制的是刚发生之事；裂纹使复制不稳定且只能有限使用。用 last_played 复制比泛化抽牌更贴合。",
-      "card": {"name": "迟照残镜", "rarity": "rare", "type": "talisman", "class": "", "cost": 2, "flavor": "镜里的人总比你慢半息", "exhaust": true, "retain": true, "effects": [{"action": "copy_cards", "target": "self", "source": "last_played", "destination": "hand", "param": "any", "value": 1}, {"action": "modify_card_cost", "target": "self", "source": "hand", "param": "highest_cost", "value": 1, "stacks": -1}]}
-    },
-    {
-      "source": "悟出将护体罡气尽数炼为杀伐力量的偏门法诀",
-      "lesson": "自然语言很怪也不必退化成通用牌。当前罡气是 source，力量是 destination，consume_source 表示转化而非复制。",
-      "card": {"name": "罡尽锋生", "rarity": "rare", "type": "gongfa", "class": "", "cost": 2, "flavor": "护身之气散尽时，锋芒才真正显形", "exhaust": true, "retain": false, "effects": [{"action": "transfer", "target": "self", "trigger": "on_play", "duration": "instant", "source": "self_block", "destination": "self_status:strength", "write_mode": "add", "consume_source": true, "value": 0}]}
-    }
-  ],
-  "final_check_before_output": [
-    "卡的机制是否能让人反推出物品是什么，而不看卡名也成立",
-    "至少两个具体特征是否真的进入了效果、费用、retain/exhaust或触发时机",
-    "数值是否没有超过对应品阶的单项上限",
-    "所有 action、target、source、destination、status 是否来自本世界书",
-    "只输出 design_analysis、card_plan、card，且只有一张卡"
+  "runtime_boundaries": [
+    "只能使用 CardScript 手册中存在的事件、动作、条件、来源、目标和牌区。",
+    "不创建循环或递归；持续规则需要用条件或 limit 控制潜在的反复触发。",
+    "不得引用不存在的卡牌、状态或剧情变量。",
+    "卡牌必须有可执行效果，卡面必须保持简短清楚；名称应独特，最终只生成一张卡。",
+    "描述和升级描述由引擎根据可执行效果生成，不在脚本中另写设计解释。"
   ]
 }

@@ -1,14 +1,17 @@
 #include "AscendPlayerController.h"
+#include "AscendAudioRouter.h"
 #include "UI/ClickProxy.h"
 #include "UI/AscendUIStyle.h"
 #include "UI/AscendRootWidget.h"
 #include "UI/AscendArt.h"
 #include "UI/AscendCardLayout.h"
 #include "UI/CombatSlashWidget.h"
+#include "UI/CardVisualResolver.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetTree.h"
 #include "TimerManager.h"
 #include "Engine/Engine.h"
+#include "Engine/Texture2D.h"
 #include "Engine/GameViewportClient.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Components/Border.h"
@@ -32,12 +35,26 @@
 #include "Components/CheckBox.h"
 #include "Components/InputComponent.h"
 #include "Kismet/GameplayStatics.h"
-#include "Sound/SoundWaveProcedural.h"
 #include "Math/UnrealMathUtility.h"
 #include "Misc/ConfigCacheIni.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 
 namespace
 {
+	static_assert(AscendCardLayout::Width > 0.f && AscendCardLayout::Height > 0.f,
+		"Card layout must have a positive final render size");
+	static_assert(AscendCardLayout::ArtX >= AscendCardLayout::InnerX
+		&& AscendCardLayout::ArtY >= AscendCardLayout::InnerY
+		&& AscendCardLayout::ArtX + AscendCardLayout::ArtW <= AscendCardLayout::InnerX + AscendCardLayout::InnerW
+		&& AscendCardLayout::ArtY + AscendCardLayout::ArtH <= AscendCardLayout::InnerY + AscendCardLayout::InnerH,
+		"Card art must stay inside the card backplate");
+	static_assert(AscendCardLayout::RulesX >= AscendCardLayout::InnerX
+		&& AscendCardLayout::RulesY >= AscendCardLayout::InnerY
+		&& AscendCardLayout::RulesX + AscendCardLayout::RulesW <= AscendCardLayout::InnerX + AscendCardLayout::InnerW
+		&& AscendCardLayout::RulesY + AscendCardLayout::RulesH <= AscendCardLayout::InnerY + AscendCardLayout::InnerH,
+		"Card rules panel must stay inside the card backplate");
+
 	constexpr float HandHoverScale = 1.4f;
 	constexpr float HandHoverLift = 36.f;
 	constexpr float TouchHandHoverScale = 1.82f;
@@ -47,12 +64,49 @@ namespace
 	constexpr float TouchDragThreshold = 22.f;
 	constexpr int32 HandHoverZOrder = 1000;
 
+	// Keep geometry on whole Slate pixels.  Fractional slot edges are especially
+	// visible on the thin card frame when a responsive hand scale is active.
+	inline float SnapCardPixel(float Value)
+	{
+		return static_cast<float>(FMath::RoundToInt(Value));
+	}
+
+	inline float GetDragCardScale(float HandScale, bool bTouch)
+	{
+		return FMath::Max(0.1f, HandScale * (bTouch ? TouchDragScale : MouseDragScale));
+	}
+
+	void ConfigureCardTexture(UImage* Image)
+	{
+		if (!Image) return;
+		UTexture2D* Texture = Cast<UTexture2D>(Image->GetBrush().GetResourceObject());
+		if (!Texture) return;
+
+		// Runtime-imported UI art must not stream in a lower mip between the hand
+		// and focus layer.  No mip chain also prevents a transient low-resolution
+		// sample while the card is being rebuilt at its final size.
+		bool bChanged = !Texture->NeverStream
+			|| Texture->LODGroup != TEXTUREGROUP_UI
+			|| Texture->Filter != TF_Bilinear;
+		Texture->NeverStream = true;
+		// MipGenSettings is editor-only in UE 5.8 and is unavailable in the
+		// packaged runtime target. NeverStream plus the UI texture group keeps
+		// the runtime card face from being replaced by a lower streamed mip.
+		#if WITH_EDITORONLY_DATA
+		bChanged = bChanged || Texture->MipGenSettings != TMGS_NoMipmaps;
+		Texture->MipGenSettings = TMGS_NoMipmaps;
+		#endif
+		Texture->LODGroup = TEXTUREGROUP_UI;
+		Texture->Filter = TF_Bilinear;
+		if (bChanged) Texture->UpdateResource();
+	}
+
 	void PlaceCardWidget(UCanvasPanel* Canvas, UWidget* Widget, float X, float Y, float W, float H, float Scale, int32 ZOrder)
 	{
 		if (UCanvasPanelSlot* Slot = Canvas->AddChildToCanvas(Widget))
 		{
-			Slot->SetPosition(FVector2D(X * Scale, Y * Scale));
-			Slot->SetSize(FVector2D(W * Scale, H * Scale));
+			Slot->SetPosition(FVector2D(SnapCardPixel(X * Scale), SnapCardPixel(Y * Scale)));
+			Slot->SetSize(FVector2D(SnapCardPixel(W * Scale), SnapCardPixel(H * Scale)));
 			Slot->SetZOrder(ZOrder);
 		}
 	}
@@ -73,8 +127,8 @@ namespace
 		const float S = FMath::Max(0.1f, Scale);
 
 		USizeBox* CardSizer = NewObject<USizeBox>(Outer);
-		CardSizer->SetWidthOverride(Width * S);
-		CardSizer->SetHeightOverride(Height * S);
+		CardSizer->SetWidthOverride(SnapCardPixel(Width * S));
+		CardSizer->SetHeightOverride(SnapCardPixel(Height * S));
 
 		UCanvasPanel* Canvas = NewObject<UCanvasPanel>(CardSizer);
 
@@ -92,6 +146,7 @@ namespace
 			: (TypeColor * 0.20f + FLinearColor(0.04f, 0.065f, 0.055f) * 0.80f));
 		if (UImage* ArtImage = FAscendArt::MakeImage(ArtClip, ArtPath))
 		{
+			ConfigureCardTexture(ArtImage);
 			UScaleBox* ArtScale = NewObject<UScaleBox>(ArtClip);
 			ArtScale->SetStretch(EStretch::ScaleToFill);
 			ArtScale->SetContent(ArtImage);
@@ -102,29 +157,30 @@ namespace
 		UOverlay* TitlePanel = NewObject<UOverlay>(Canvas);
 		if (UImage* TitleArt = FAscendArt::MakeImage(TitlePanel, TEXT("Art/ui/card_title_bar_v2.png")))
 		{
+			ConfigureCardTexture(TitleArt);
 			TitleArt->SetVisibility(ESlateVisibility::HitTestInvisible);
 			UOverlaySlot* ArtSlot = TitlePanel->AddChildToOverlay(TitleArt);
 			ArtSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
 			ArtSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
 		}
 		UTextBlock* NameText = FAscendUIStyle::MakeText(TitlePanel, DisplayName,
-			FMath::Clamp(FMath::RoundToInt(14.f * S), 11, 17), FAscendUIStyle::GoldYellow());
+			FAscendUIStyle::CardTitleFontSize(S), FAscendUIStyle::GoldYellow());
 		NameText->SetJustification(ETextJustify::Center);
+		NameText->SetAutoWrapText(true);
+		NameText->SetWrapTextAt(SnapCardPixel(130.f * S));
 		NameText->SetShadowOffset(FVector2D(1.f, 1.f));
-		UScaleBox* NameScale = NewObject<UScaleBox>(TitlePanel);
-		NameScale->SetStretch(EStretch::ScaleToFit);
-		NameScale->SetStretchDirection(EStretchDirection::DownOnly);
-		NameScale->SetContent(NameText);
-		UOverlaySlot* NameSlot = TitlePanel->AddChildToOverlay(NameScale);
+		UOverlaySlot* NameSlot = TitlePanel->AddChildToOverlay(NameText);
 		NameSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
 		NameSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
-		NameSlot->SetPadding(FMargin(17.f * S, 5.f * S, 17.f * S, 5.f * S));
+		NameSlot->SetPadding(FMargin(SnapCardPixel(17.f * S), SnapCardPixel(5.f * S),
+			SnapCardPixel(17.f * S), SnapCardPixel(5.f * S)));
 		PlaceCardWidget(Canvas, TitlePanel, TitleX, TitleY, TitleW, TitleH, S, 15);
 
 		UOverlay* RulesPanel = NewObject<UOverlay>(Canvas);
 		RulesPanel->SetClipping(EWidgetClipping::ClipToBounds);
 		if (UImage* RulesArt = FAscendArt::MakeImage(RulesPanel, TEXT("Art/ui/card_rules_panel_v2.png")))
 		{
+			ConfigureCardTexture(RulesArt);
 			RulesArt->SetVisibility(ESlateVisibility::HitTestInvisible);
 			UOverlaySlot* ArtSlot = RulesPanel->AddChildToOverlay(RulesArt);
 			ArtSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
@@ -140,24 +196,22 @@ namespace
 			RulesText += RulesText.IsEmpty() ? TEXT("【消耗】") : TEXT("\n【消耗】");
 		}
 		UTextBlock* DescriptionText = FAscendUIStyle::MakeText(RulesPanel, RulesText,
-			FMath::Clamp(FMath::RoundToInt(10.f * S), 8, 12), FAscendUIStyle::PaperWhite());
+			FAscendUIStyle::CardDescriptionFontSize(S), FAscendUIStyle::PaperWhite());
 		DescriptionText->SetAutoWrapText(true);
-		DescriptionText->SetWrapTextAt(120.f * S);
+		DescriptionText->SetWrapTextAt(SnapCardPixel(120.f * S));
 		DescriptionText->SetJustification(ETextJustify::Center);
-		UScaleBox* DescriptionScale = NewObject<UScaleBox>(RulesPanel);
-		DescriptionScale->SetStretch(EStretch::ScaleToFit);
-		DescriptionScale->SetStretchDirection(EStretchDirection::DownOnly);
-		DescriptionScale->SetContent(DescriptionText);
-		UOverlaySlot* DescriptionSlot = RulesPanel->AddChildToOverlay(DescriptionScale);
+		UOverlaySlot* DescriptionSlot = RulesPanel->AddChildToOverlay(DescriptionText);
 		DescriptionSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
 		DescriptionSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
-		DescriptionSlot->SetPadding(FMargin(10.f * S, 9.f * S, 10.f * S, 9.f * S));
+		DescriptionSlot->SetPadding(FMargin(SnapCardPixel(10.f * S), SnapCardPixel(9.f * S),
+			SnapCardPixel(10.f * S), SnapCardPixel(9.f * S)));
 		PlaceCardWidget(Canvas, RulesPanel, RulesX, RulesY, RulesW, RulesH, S, 15);
 
 		// The frame is a true transparent overlay and is deliberately last, so it
 		// masks the joins without ever reserving or guessing a content area.
 		if (UImage* Frame = FAscendArt::MakeImage(Canvas, TEXT("Art/ui/card_border_v2.png")))
 		{
+			ConfigureCardTexture(Frame);
 			Frame->SetVisibility(ESlateVisibility::HitTestInvisible);
 			PlaceCardWidget(Canvas, Frame, 0.f, 0.f, Width, Height, S, 40);
 		}
@@ -165,13 +219,14 @@ namespace
 		UOverlay* CostGem = NewObject<UOverlay>(Canvas);
 		if (UImage* GemArt = FAscendArt::MakeImage(CostGem, TEXT("Art/ui/spirit_gem.png")))
 		{
+			ConfigureCardTexture(GemArt);
 			GemArt->SetVisibility(ESlateVisibility::HitTestInvisible);
 			UOverlaySlot* GemSlot = CostGem->AddChildToOverlay(GemArt);
 			GemSlot->SetHorizontalAlignment(EHorizontalAlignment::HAlign_Fill);
 			GemSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
 		}
 		UTextBlock* CostText = FAscendUIStyle::MakeText(CostGem, FString::FromInt(DisplayCost),
-			FMath::Clamp(FMath::RoundToInt(22.f * S), 18, 27), CostColor);
+			FAscendUIStyle::CardCostFontSize(S), CostColor);
 		CostText->SetJustification(ETextJustify::Center);
 		CostText->SetShadowOffset(FVector2D(2.f, 2.f));
 		CostText->SetShadowColorAndOpacity(FLinearColor(0.f, 0.02f, 0.04f, 1.f));
@@ -230,6 +285,8 @@ void AAscendPlayerController::BeginPlay()
 	Run = NewObject<URunManager>(this);
 	InfiniteNarrativeService = NewObject<UInfiniteNarrativeService>(this);
 	LoadInfiniteNarrativeSettings();
+	AudioRouter = NewObject<UAscendAudioRouter>(this);
+	AudioRouter->Initialize(this, InfiniteNarrativeSettings.SfxVolume, InfiniteNarrativeSettings.MusicVolume);
 
 	// 根界面：Overlay（底层ScreenHost + 上层AnimCanvas）
 	RootWidget = CreateWidget<UAscendRootWidget>(this, UAscendRootWidget::StaticClass());
@@ -287,6 +344,113 @@ void AAscendPlayerController::BeginPlay()
 	RootWidget->AddToViewport(0);
 
 	ShowTitle();
+
+#if !UE_BUILD_SHIPPING
+	// Development-only visual acceptance route. It exercises the same card-play,
+	// combat-log and animation path as a real run while never touching the save.
+	const bool bVFXSignature = FParse::Param(FCommandLine::Get(), TEXT("VFXShowcase"));
+	const bool bVFXElements = FParse::Param(FCommandLine::Get(), TEXT("VFXShowcaseElements"));
+	const bool bVFXSupport = FParse::Param(FCommandLine::Get(), TEXT("VFXShowcaseSupport"));
+	const bool bVFXAutoPlay = FParse::Param(FCommandLine::Get(), TEXT("VFXAutoPlay"));
+	const bool bRPVisualTest = FParse::Param(FCommandLine::Get(), TEXT("RPVisualTest"));
+	if (bRPVisualTest)
+	{
+		GetWorld()->GetTimerManager().SetTimerForNextTick(
+			FTimerDelegate::CreateWeakLambda(this, [this]() { StartRPNarrativeVisualTest(); }));
+	}
+	if (bVFXSignature || bVFXElements || bVFXSupport)
+	{
+		GetWorld()->GetTimerManager().SetTimerForNextTick(
+			FTimerDelegate::CreateWeakLambda(this, [this, bVFXElements, bVFXSupport, bVFXAutoPlay]()
+			{
+				if (!Run || !Run->StartNewRun(20260830, true)) return;
+
+				TArray<FDeckCard> ShowcaseDeck;
+				auto AddShowcaseCard = [&ShowcaseDeck](const TCHAR* CardId, bool bUpgraded = false)
+				{
+					FDeckCard Card;
+					Card.CardId = CardId;
+					Card.bUpgraded = bUpgraded;
+					ShowcaseDeck.Add(Card);
+				};
+				if (bVFXElements)
+				{
+					AddShowcaseCard(TEXT("heavenly_thunder"));
+					AddShowcaseCard(TEXT("wildfire"));
+					AddShowcaseCard(TEXT("poison_palm"));
+					AddShowcaseCard(TEXT("venom_burst"));
+					AddShowcaseCard(TEXT("mind_sever"));
+				}
+				else if (bVFXSupport)
+				{
+					AddShowcaseCard(TEXT("vajra"));
+					AddShowcaseCard(TEXT("qi_breath"));
+					AddShowcaseCard(TEXT("sword_immortal_gongfa"));
+					AddShowcaseCard(TEXT("spirit_gathering"));
+					AddShowcaseCard(TEXT("curse_regret"));
+				}
+				else
+				{
+					AddShowcaseCard(TEXT("strike"));
+					AddShowcaseCard(TEXT("one_sword"));
+					AddShowcaseCard(TEXT("wan_jian_gui_zong"), true);
+					AddShowcaseCard(TEXT("sword_qi"));
+					AddShowcaseCard(TEXT("rejuvenation"));
+				}
+
+				CurrentEncounter = FNodeEncounter();
+				CurrentEncounter.Type = EMapNodeType::Combat;
+				CurrentEncounter.EnemyIds = {TEXT("mountain_imp")};
+				CurrentEncounter.EnemyHPBonus = 900;
+
+				Combat = NewObject<UCombatEngine>(this);
+				Combat->OnLog.AddDynamic(this, &AAscendPlayerController::OnCombatLogDynamic);
+				CombatLogLines.Reset();
+				LastProcessedLogIndex = 0;
+				LastProcessedEnemyDamageEventIndex = 0;
+				if (Combat->StartCombat(ShowcaseDeck, CurrentEncounter.EnemyIds, {},
+					Run->State.MaxHP, Run->State.MaxHP, CurrentEncounter.EnemyHPBonus,
+					20260830, 0))
+				{
+					Combat->Spirit = 9;
+					Combat->MaxSpirit = 9;
+					ShowCombat();
+					UE_LOG(LogTemp, Display, TEXT("[AscendVFX] showcase ready family=%s"),
+						bVFXElements ? TEXT("elements") : (bVFXSupport ? TEXT("support") : TEXT("signature")));
+
+					if (bVFXAutoPlay && GetWorld())
+					{
+						TSharedPtr<TArray<FString>> CardIds = MakeShared<TArray<FString>>();
+						for (const FDeckCard& Card : ShowcaseDeck) CardIds->Add(Card.CardId);
+						TSharedPtr<int32> NextCard = MakeShared<int32>(0);
+						TSharedPtr<FTimerHandle> AutoTimer = MakeShared<FTimerHandle>();
+						GetWorld()->GetTimerManager().SetTimer(*AutoTimer,
+							FTimerDelegate::CreateWeakLambda(this,
+								[this, CardIds, NextCard, AutoTimer]()
+								{
+									if (!Combat || !Combat->bCombatActive || !CardIds->IsValidIndex(*NextCard))
+									{
+										if (GetWorld()) GetWorld()->GetTimerManager().ClearTimer(*AutoTimer);
+										return;
+									}
+									const FString CardId = (*CardIds)[*NextCard];
+									const int32 HandIndex = Combat->Hand.IndexOfByPredicate(
+										[&CardId](const FCardInstance& Card) { return Card.Data.Id == CardId; });
+									++(*NextCard);
+									if (HandIndex == INDEX_NONE) return;
+									const FCardInstance PlayedCard = Combat->Hand[HandIndex];
+									if (!Combat->PlayCard(HandIndex, 0)) return;
+									RefreshCombatPanel();
+									PlayCardVisual(PlayedCard, 0);
+									TriggerCombatAnimations(TEXT("card"));
+									UE_LOG(LogTemp, Display, TEXT("[AscendVFX] autoplay card=%s animation=%s"),
+										*CardId, *AscendCardVisual::ResolveAnimation(PlayedCard));
+								}), 1.85f, true, 1.2f);
+					}
+				}
+			}));
+	}
+#endif
 }
 
 // -----------------------------------------------------------
@@ -313,6 +477,12 @@ UButton* AAscendPlayerController::MakeLinkedButton(UObject* Outer, const FString
 	P->Owner = this;
 	Btn->OnClicked.AddDynamic(P, &UClickProxy::HandleClick);
 	PendingScreenProxies.Add(P);
+	UClickProxy* HoverProxy = NewObject<UClickProxy>(Btn);
+	HoverProxy->Tag = TEXT("button_hover");
+	HoverProxy->Index = Index;
+	HoverProxy->Owner = this;
+	Btn->OnHovered.AddDynamic(HoverProxy, &UClickProxy::HandleHovered);
+	PendingScreenProxies.Add(HoverProxy);
 	return Btn;
 }
 
@@ -321,9 +491,11 @@ UTextBlock* AAscendPlayerController::MakeLogText(const FString& Text, FSlateColo
 	return FAscendUIStyle::MakeText(RootWidget, Text, 15, Color);
 }
 
-void AAscendPlayerController::SetScreen(UWidget* Content, EGameScreen Screen)
+void AAscendPlayerController::SetScreen(UWidget* Content, EGameScreen Screen,
+	const FString& MusicStateOverride)
 {
 	UE_LOG(LogTemp, Display, TEXT("[DIAG] SetScreen begin screen=%d"), static_cast<int32>(Screen));
+	const EGameScreen PreviousScreen = CurrentScreen;
 	// Screen builders create their controls before this call. Retain only this generation so
 	// buttons from every previous combat/RP redraw do not keep entire widget trees alive.
 	Proxies = MoveTemp(PendingScreenProxies);
@@ -331,6 +503,9 @@ void AAscendPlayerController::SetScreen(UWidget* Content, EGameScreen Screen)
 	ClearAnimations();
 	UE_LOG(LogTemp, Display, TEXT("[DIAG] SetScreen after ClearAnimations"));
 	CurrentScreen = Screen;
+	SetMusicForScreen(Screen, PreviousScreen, MusicStateOverride);
+	if (Screen == EGameScreen::Combat && PreviousScreen != EGameScreen::Combat)
+		PlayAudioEvent(TEXT("combat_enter"), 0.70f, 0.98f, 1.02f);
 
 	// 各界面微调底色，营造层次（战斗偏墨蓝、地图偏黛绿、标题偏暖墨）
 	FLinearColor Bg(0.06f, 0.06f, 0.08f);
@@ -342,12 +517,48 @@ void AAscendPlayerController::SetScreen(UWidget* Content, EGameScreen Screen)
 	case EGameScreen::Map:      Bg = FLinearColor(0.05f, 0.062f, 0.055f); BgArt = TEXT("Art/bg/map.png"); DimAlpha = 0.58f; break;
 	case EGameScreen::Combat:   Bg = FLinearColor(0.052f, 0.048f, 0.072f); BgArt = TEXT("Art/bg/combat.png"); DimAlpha = 0.68f; break;
 	case EGameScreen::Reward:   Bg = FLinearColor(0.06f, 0.055f, 0.05f); BgArt = TEXT("Art/bg/reward.png"); DimAlpha = 0.60f; break;
-	case EGameScreen::Event:    Bg = FLinearColor(0.06f, 0.055f, 0.075f); break;
-	case EGameScreen::Shop:     Bg = FLinearColor(0.07f, 0.06f, 0.045f); break;
-	case EGameScreen::Rest:     Bg = FLinearColor(0.045f, 0.06f, 0.06f); break;
+	case EGameScreen::Event:    Bg = FLinearColor(0.06f, 0.055f, 0.075f); BgArt = TEXT("Art/bg/reward.png"); DimAlpha = 0.79f; break;
+	case EGameScreen::InfiniteNarrative: Bg = FLinearColor(0.042f, 0.055f, 0.058f); BgArt = TEXT("Art/bg/map.png"); DimAlpha = 0.80f; break;
+	case EGameScreen::Settings: Bg = FLinearColor(0.05f, 0.055f, 0.06f); BgArt = TEXT("Art/bg/title.png"); DimAlpha = 0.84f; break;
+	case EGameScreen::Shop:     Bg = FLinearColor(0.07f, 0.06f, 0.045f); BgArt = TEXT("Art/bg/reward.png"); DimAlpha = 0.76f; break;
+	case EGameScreen::Rest:     Bg = FLinearColor(0.045f, 0.06f, 0.06f); BgArt = TEXT("Art/bg/map.png"); DimAlpha = 0.78f; break;
 	default: break;
 	}
 	ScreenHost->SetBrushColor(Bg);
+
+	auto AnimateScreenEntrance = [this, PreviousScreen, Screen](UWidget* ScreenContent)
+	{
+		if (!ScreenContent || !GetWorld() || PreviousScreen == Screen) return;
+		const float Duration = Screen == EGameScreen::Combat ? 0.24f : 0.34f;
+		const float StartOffset = Screen == EGameScreen::Combat ? 10.f : 20.f;
+		ScreenContent->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
+		ScreenContent->SetRenderOpacity(0.f);
+		ScreenContent->SetRenderTranslation(FVector2D(0.f, StartOffset));
+		const double StartTime = FPlatformTime::Seconds();
+		TWeakObjectPtr<UWidget> WeakContent(ScreenContent);
+		TSharedPtr<FTimerHandle> TimerHandle = MakeShared<FTimerHandle>();
+		GetWorld()->GetTimerManager().SetTimer(*TimerHandle,
+			FTimerDelegate::CreateWeakLambda(this,
+				[this, WeakContent, TimerHandle, StartTime, Duration, StartOffset]()
+				{
+					if (!WeakContent.IsValid())
+					{
+						if (UWorld* World = GetWorld()) World->GetTimerManager().ClearTimer(*TimerHandle);
+						return;
+					}
+					const float T = FMath::Clamp(static_cast<float>((FPlatformTime::Seconds() - StartTime) / Duration), 0.f, 1.f);
+					const float Ease = 1.f - FMath::Pow(1.f - T, 3.f);
+					WeakContent->SetRenderOpacity(Ease);
+					WeakContent->SetRenderTranslation(FVector2D(0.f, StartOffset * (1.f - Ease)));
+					if (T >= 1.f)
+					{
+						WeakContent->SetRenderOpacity(1.f);
+						WeakContent->SetRenderTranslation(FVector2D::ZeroVector);
+						if (UWorld* World = GetWorld()) World->GetTimerManager().ClearTimer(*TimerHandle);
+					}
+				}), 0.016f, true);
+		AnimTimerHandles.Add(*TimerHandle);
+	};
 
 	// 背景水墨图 + 暗化遮罩（保证文字可读）
 	if (!BgArt.IsEmpty())
@@ -374,10 +585,76 @@ void AAscendPlayerController::SetScreen(UWidget* Content, EGameScreen Screen)
 			ContentSlot->SetVerticalAlignment(EVerticalAlignment::VAlign_Fill);
 
 			ScreenHost->SetContent(Wrap);
+			AnimateScreenEntrance(Content);
 			return;
 		}
 	}
 	ScreenHost->SetContent(Content);
+	AnimateScreenEntrance(Content);
+}
+
+void AAscendPlayerController::SetMusicForScreen(EGameScreen Screen, EGameScreen PreviousScreen,
+	const FString& MusicStateOverride)
+{
+	if (!AudioRouter) return;
+
+	FString State = MusicStateOverride;
+	if (State.IsEmpty())
+	{
+		switch (Screen)
+		{
+		case EGameScreen::Title:
+		case EGameScreen::Settings:
+			State = TEXT("bgm_title");
+			break;
+		case EGameScreen::AuthoredLibrary:
+			State = TEXT("bgm_deckbuilding");
+			break;
+		case EGameScreen::Map:
+			State = TEXT("bgm_map");
+			break;
+		case EGameScreen::Combat:
+			State = CurrentEncounter.Type == EMapNodeType::Boss ? TEXT("bgm_combat_boss")
+				: (CurrentEncounter.Type == EMapNodeType::Elite ? TEXT("bgm_combat_elite") : TEXT("bgm_combat"));
+			break;
+		case EGameScreen::Event:
+			State = CurrentEncounter.bIsNarrative ? TEXT("bgm_narrative") : TEXT("bgm_event");
+			break;
+		case EGameScreen::InfiniteNarrative:
+			if (bInfiniteFunctionFlowActive && ActiveInfiniteGameOperation.Op == TEXT("choose_upgrade_card"))
+				State = TEXT("bgm_upgrade");
+			else if (bInfiniteFunctionFlowActive && ActiveInfiniteGameOperation.Op == TEXT("choose_remove_card"))
+				State = TEXT("bgm_deckbuilding");
+			else
+				State = TEXT("bgm_narrative");
+			break;
+		case EGameScreen::Acquisition:
+			State = TEXT("bgm_card_discovery");
+			break;
+		case EGameScreen::Shop:
+			State = TEXT("bgm_shop");
+			break;
+		case EGameScreen::Rest:
+			State = TEXT("bgm_rest");
+			break;
+		case EGameScreen::Reward:
+			State = TEXT("bgm_reward");
+			break;
+		case EGameScreen::Victory:
+			State = TEXT("bgm_victory");
+			break;
+		case EGameScreen::GameOver:
+			State = TEXT("bgm_defeat");
+			break;
+		default:
+			State = TEXT("bgm_map");
+			break;
+		}
+	}
+
+	// A same-screen redraw (card selection, combat log, streaming narrative) must
+	// not restart the track. A real screen transition advances that state's A/B pair.
+	AudioRouter->SetMusicState(State, PreviousScreen != Screen);
 }
 
 void AAscendPlayerController::OnCombatLogDynamic(const FString& Msg)
@@ -388,7 +665,14 @@ void AAscendPlayerController::OnCombatLogDynamic(const FString& Msg)
 void AAscendPlayerController::OnCombatLog(const FString& Msg)
 {
 	CombatLogLines.Add(Msg);
-	if (CombatLogLines.Num() > 60) CombatLogLines.RemoveAt(0);
+	if (CombatLogLines.Num() > 60)
+	{
+		CombatLogLines.RemoveAt(0);
+		// Keep the animation consumer cursor aligned with the rolling log window.
+		// Without this, a long fight eventually leaves LastProcessedLogIndex at 60
+		// while the capped array also stays at 60, silently stopping all hit feedback.
+		LastProcessedLogIndex = FMath::Max(0, LastProcessedLogIndex - 1);
+	}
 }
 
 // -----------------------------------------------------------
@@ -416,7 +700,30 @@ void AAscendPlayerController::DispatchClick(const FString& Tag, int32 Index)
 void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 {
 	const bool bMenuAction = Tag.StartsWith(TEXT("menu_"));
-	if (bInputLocked && !bMenuAction) return;
+	const bool bSettingsNavigation = Tag == TEXT("settings_save")
+		|| Tag == TEXT("settings_back") || Tag == TEXT("settings_tab");
+	// Settings navigation is safe even while an RP request is pending: it cannot
+	// choose a branch or mutate combat. Gameplay actions remain locked.
+	if (bInputLocked && !bMenuAction && !bSettingsNavigation) return;
+	if (Tag.Contains(TEXT("back")) || Tag == TEXT("menu_resume"))
+		PlayAudioEvent(TEXT("ui_back"), 0.75f);
+	else if (Tag == TEXT("lock_target"))
+		PlayAudioEvent(TEXT("target_lock"), 0.70f);
+	else if (Tag == TEXT("endturn"))
+		PlayAudioEvent(TEXT("end_turn"), 0.78f);
+	else if (Tag == TEXT("discover_choice"))
+		PlayAudioEvent(TEXT("card_pick"), 0.65f);
+	else if (Tag == TEXT("menu_open") || Tag == TEXT("settings_save") || Tag == TEXT("settings_tab")
+		|| Tag == TEXT("rp_choice") || Tag == TEXT("event_choice") || Tag == TEXT("reward")
+		|| Tag == TEXT("reward_skip") || Tag == TEXT("cultivation_choice") || Tag == TEXT("shop_buy") || Tag == TEXT("rest_heal")
+		|| Tag == TEXT("rest_upgrade") || Tag == TEXT("start_relic") || Tag == TEXT("node")
+		|| Tag == TEXT("pile_draw") || Tag == TEXT("pile_discard") || Tag == TEXT("pile_close"))
+		PlayAudioEvent(TEXT("ui_confirm"), 0.70f);
+	else if (Tag == TEXT("pill"))
+		PlayAudioEvent(TEXT("potion"), 0.75f);
+	else
+		// Cover title, narrative, retry, close and future buttons by default.
+		PlayAudioEvent(TEXT("ui_confirm"), 0.62f);
 	if (Tag == TEXT("menu_open"))
 	{
 		TogglePauseMenu();
@@ -427,29 +734,35 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 		HidePauseMenu();
 		return;
 	}
-	if (Tag == TEXT("menu_save_settings"))
-	{
-		const bool bRefreshRP = CurrentScreen == EGameScreen::InfiniteNarrative;
-		SaveInfiniteNarrativeSettings();
-		HidePauseMenu();
-		if (bRefreshRP) ShowInfiniteNarrative();
-		return;
-	}
 	if (Tag == TEXT("menu_full_settings"))
 	{
 		SettingsReturnScreen = CurrentScreen;
+		// Title settings return to the title directly; only an in-run pause menu
+		// reopens its overlay after the full settings page.
+		bSettingsReturnToPause = CurrentScreen != EGameScreen::Title;
+		SettingsReturnScrollOffset = RPScrollBox ? RPScrollBox->GetScrollOffset() : 0.f;
 		HidePauseMenu();
 		ShowSettings(SettingsCategory);
 		return;
 	}
 	if (Tag == TEXT("menu_title"))
 	{
-		SaveAndReturnToTitle();
+		RequestLeaveConfirmation(false);
 		return;
 	}
 	if (Tag == TEXT("menu_quit"))
 	{
-		SaveAndQuitGame();
+		RequestLeaveConfirmation(true);
+		return;
+	}
+	if (Tag == TEXT("menu_leave_confirm"))
+	{
+		ConfirmLeaveConfirmation();
+		return;
+	}
+	if (Tag == TEXT("menu_leave_cancel"))
+	{
+		CancelLeaveConfirmation();
 		return;
 	}
 	if (Tag == TEXT("title_new") || Tag == TEXT("title_infinite"))
@@ -460,10 +773,14 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 	else if (Tag == TEXT("title_settings"))
 	{
 		SettingsReturnScreen = EGameScreen::Title;
+		bSettingsReturnToPause = false;
+		SettingsReturnScrollOffset = 0.f;
 		ShowSettings(SettingsCategory);
 	}
 	else if (Tag == TEXT("title_continue"))
 	{
+		InvalidateInfiniteNarrativeFlow();
+		if (InfiniteNarrativeService) InfiniteNarrativeService->CancelGeneration();
 		if (Run->LoadRun())
 		{
 			if (Run->State.bInfiniteNarrativeMode)
@@ -472,12 +789,54 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 				if (Run->RestorePendingInfiniteCombat(PendingInfiniteEncounter, ResultSummary,
 					PendingNarrativeCards, PendingNarrativeRelics))
 				{
+					if (Run->HasPendingInfiniteOpening())
+					{
+						Run->ClearPendingInfiniteOpening();
+						Run->SaveRun();
+					}
 					PendingInfiniteChoice = FInfiniteNarrativeChoice();
 					PendingInfiniteChoice.ResultSummary = ResultSummary;
 					if (PendingNarrativeCards.Num() + PendingNarrativeRelics.Num() > 0) ShowAcquiredItems();
 					else BeginPendingInfiniteCombat();
 				}
-				else RequestNextInfiniteNarrative();
+					else if (Run->HasPendingInfiniteOpening())
+					{
+					if (RestoreAuthoredOpeningFromRunState()) ShowInfiniteNarrative();
+					else
+					{
+						Run->ClearPendingInfiniteOpening();
+						Run->SaveRun();
+						RequestNextInfiniteNarrative();
+						}
+					}
+					else if (Run->State.bInfiniteFreeRPForcedJumpPending)
+					{
+						// A free-RP bridge is a persisted two-turn transaction. If the app was
+						// closed while the result was waiting to be read, restore that result
+						// and keep the explicit continue gate. Only a request that had already
+						// crossed the gate is resumed automatically after loading.
+						if (Run->State.bInfiniteFreeRPForcedJumpAwaitingContinue)
+						{
+							if (RestoreFreeRPForcedJumpResultFromRunState()) ShowInfiniteNarrative();
+							else
+							{
+								Run->State.bInfiniteFreeRPForcedJumpAwaitingContinue = false;
+								Run->SaveRun();
+								bInfiniteFreeRPForcedTurnActive = true;
+								RequestNextInfiniteNarrative(Run->State.InfiniteFreeRPForcedDirection,
+									EInfiniteNarrativeRequestKind::ForcedFreeRPJump,
+									Run->State.InfiniteFreeRPForcedDirection);
+							}
+						}
+						else
+						{
+							bInfiniteFreeRPForcedTurnActive = true;
+							RequestNextInfiniteNarrative(Run->State.InfiniteFreeRPForcedDirection,
+								EInfiniteNarrativeRequestKind::ForcedFreeRPJump,
+								Run->State.InfiniteFreeRPForcedDirection);
+						}
+					}
+					else RequestNextInfiniteNarrative();
 			}
 			else ShowMap();
 		}
@@ -493,7 +852,8 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 	}
 	else if (Tag == TEXT("settings_tab"))
 	{
-		SaveInfiniteNarrativeSettings();
+		if (bSettingsDraftActive)
+			ApplySettingsWidgetsTo(SettingsDraft, false);
 		ShowSettings(Index);
 	}
 	else if (Tag == TEXT("rp_choice"))
@@ -502,8 +862,25 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 	}
 	else if (Tag == TEXT("rp_freeform"))
 	{
+		if (!IsFreeRPInputAvailableForAutomationTest(InfiniteNarrativeSettings.bShowFreeformInput,
+			bInfiniteFreeRPForcedTurnActive
+				|| (Run && Run->State.bInfiniteFreeRPForcedJumpPending),
+			bInfiniteNarrativeRequestInFlight, bOpeningChoiceWordingPending)) return;
 		const FString Action = RPFreeformInput ? RPFreeformInput->GetText().ToString().TrimStartAndEnd() : TEXT("");
-		if (!Action.IsEmpty()) RequestNextInfiniteNarrative(Action);
+		if (!Action.IsEmpty())
+			RequestNextInfiniteNarrative(Action, EInfiniteNarrativeRequestKind::Freeform);
+	}
+	else if (Tag == TEXT("rp_free_rp_continue"))
+	{
+		const bool bForcedJumpPending = Run && Run->State.bInfiniteFreeRPForcedJumpPending;
+		const bool bAwaitingContinue = Run && Run->State.bInfiniteFreeRPForcedJumpAwaitingContinue;
+		if (!IsFreeRPForcedContinueAvailableForAutomationTest(
+			bForcedJumpPending, bAwaitingContinue,
+			bInfiniteNarrativeRequestInFlight || bInfiniteFreeRPForcedTurnActive)) return;
+		bInfiniteFreeRPForcedTurnActive = true;
+		const FString Direction = Run->State.InfiniteFreeRPForcedDirection;
+		RequestNextInfiniteNarrative(Direction,
+			EInfiniteNarrativeRequestKind::ForcedFreeRPJump, Direction);
 	}
 	else if (Tag == TEXT("rp_retry"))
 	{
@@ -514,7 +891,16 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 			StartCombatNarrativePrefetch(bCombatPrefetchIncludedLog);
 			ShowInfiniteNarrativeLoading(TEXT("正在重新生成战后剧情……"));
 		}
-		else RequestNextInfiniteNarrative();
+		else if ((bInfiniteFreeRPForcedTurnActive
+			|| (Run && Run->State.bInfiniteFreeRPForcedJumpPending))
+			&& !(Run && Run->State.bInfiniteFreeRPForcedJumpAwaitingContinue))
+		{
+			bInfiniteFreeRPForcedTurnActive = true;
+			const FString Direction = Run ? Run->State.InfiniteFreeRPForcedDirection : FString();
+			RequestNextInfiniteNarrative(Direction, EInfiniteNarrativeRequestKind::ForcedFreeRPJump, Direction);
+		}
+		else RequestNextInfiniteNarrative(PendingInfiniteFreeformAction,
+			EInfiniteNarrativeRequestKind::Freeform);
 	}
 	else if (Tag == TEXT("rp_error_title"))
 	{
@@ -682,6 +1068,8 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 			}
 		}
 		Combat->PendingTurnEndDiscardUIDs.Reset();
+		if (DiscardAnimStarts.Num() > 0)
+			PlayAudioEvent(TEXT("discard"), 0.52f);
 
 		if (Combat->IsCombatOver())
 		{
@@ -721,6 +1109,28 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 			TriggerCombatAnimations(TEXT("pill"));
 		}
 	}
+	else if (Tag == TEXT("cultivation_choice"))
+	{
+		if (!Run || Run->State.Cultivation.PendingChoiceCount <= 0 || Index < 0 || Index > 2)
+		{
+			PlayAudioEvent(TEXT("ui_deny"), 0.62f);
+			return;
+		}
+		const ECultivationChoice Choice = Index == 0 ? ECultivationChoice::BodyTempering
+			: Index == 1 ? ECultivationChoice::QiAbsorption : ECultivationChoice::Insight;
+		const FCultivationChoiceResult ChoiceResult = Run->ApplyCultivationChoice(Choice);
+		if (!ChoiceResult.bApplied)
+		{
+			PlayAudioEvent(TEXT("ui_deny"), 0.62f);
+		}
+		else
+		{
+			PlayAudioEvent(TEXT("breakthrough"), 0.72f);
+			Run->SaveRun();
+		}
+		if (CurrentScreen == EGameScreen::Reward) ShowReward();
+		else if (CurrentScreen == EGameScreen::Rest) ShowRest();
+	}
 	else if (Tag == TEXT("loot_yes"))
 	{
 		PendingReward = Run->ResolveCombatVictory(true, Combat->Player.HP, Combat->Gold);
@@ -733,6 +1143,12 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 	}
 	else if (Tag == TEXT("reward"))
 	{
+		if (Run && Run->State.Cultivation.PendingChoiceCount > 0)
+		{
+			PlayAudioEvent(TEXT("ui_deny"), 0.62f);
+			ShowReward();
+			return;
+		}
 		if (PendingReward.CardChoices.IsValidIndex(Index))
 		{
 			Run->PickRewardCard(PendingReward.CardChoices[Index]);
@@ -742,12 +1158,24 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 	}
 	else if (Tag == TEXT("reward_skip"))
 	{
+		if (Run && Run->State.Cultivation.PendingChoiceCount > 0)
+		{
+			PlayAudioEvent(TEXT("ui_deny"), 0.62f);
+			ShowReward();
+			return;
+		}
 		Run->PickRewardCard(FDeckCard());
 		if (bInfiniteFunctionFlowActive) CompleteInfiniteGameFunction();
 		else ContinueAfterReward();
 	}
 	else if (Tag == TEXT("reward_to_narrative"))
 	{
+		if (Run && Run->State.Cultivation.PendingChoiceCount > 0)
+		{
+			PlayAudioEvent(TEXT("ui_deny"), 0.62f);
+			ShowReward();
+			return;
+		}
 		if (PendingReward.CardChoices.IsValidIndex(Index))
 		{
 			Run->PickRewardCard(PendingReward.CardChoices[Index]);
@@ -766,7 +1194,8 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 	else if (Tag == TEXT("shop_buy"))
 	{
 		UE_LOG(LogTemp, Display, TEXT("[DIAG] shop_buy begin idx=%d"), Index);
-		Run->BuyShopItem(Index);
+		const bool bBought = Run->BuyShopItem(Index);
+		PlayAudioEvent(bBought ? TEXT("gold") : TEXT("ui_deny"), bBought ? 0.58f : 0.62f);
 		UE_LOG(LogTemp, Display, TEXT("[DIAG] shop_buy ShowShop begin"));
 		ShowShop();
 		UE_LOG(LogTemp, Display, TEXT("[DIAG] shop_buy done"));
@@ -782,14 +1211,28 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 	}
 	else if (Tag == TEXT("rest_heal"))
 	{
+		if (Run && Run->State.Cultivation.PendingChoiceCount > 0)
+		{
+			PlayAudioEvent(TEXT("ui_deny"), 0.62f);
+			ShowRest();
+			return;
+		}
 		Run->ResolveRest(true);
+		PlayAudioEvent(TEXT("heal_chime"), 0.70f);
 		Run->SaveRun();
 		if (bInfiniteFunctionFlowActive) CompleteInfiniteGameFunction();
 		else ShowMap();
 	}
 	else if (Tag == TEXT("rest_upgrade"))
 	{
+		if (Run && Run->State.Cultivation.PendingChoiceCount > 0)
+		{
+			PlayAudioEvent(TEXT("ui_deny"), 0.62f);
+			ShowRest();
+			return;
+		}
 		Run->ResolveRest(false);
+		PlayAudioEvent(TEXT("breakthrough"), 0.72f);
 		Run->SaveRun();
 		if (bInfiniteFunctionFlowActive) CompleteInfiniteGameFunction();
 		else ShowMap();
@@ -817,9 +1260,17 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 			RegisterEncounterRuntimeEnemies();
 			CombatLogLines.Reset();
 			LastProcessedLogIndex = 0;
-			if (Combat->StartCombat(Run->State.Deck, Enc.EnemyIds, Run->State.RelicIds,
+			LastProcessedEnemyDamageEventIndex = 0;
+			const FCombatDifficultyProfile Difficulty = Run->BeginCombatDifficulty(Enc.EnemyIds, Enc.Type);
+			Enc.BattleSerial = Difficulty.BattleSerial;
+			Enc.HPScale = Difficulty.HPScale;
+			Enc.IntentScale = Difficulty.IntentScale;
+			Enc.ThreatScore = Difficulty.ThreatScore;
+			Enc.DifficultyTier = Difficulty.Tier;
+			CurrentEncounter = Enc;
+			if (Combat->StartCombatWithDifficulty(Run->State.Deck, Enc.EnemyIds, Run->State.RelicIds,
 				Run->State.MaxHP, Run->State.HP, Enc.EnemyHPBonus,
-				FMath::RandRange(1, 999999), Enc.EnemyLevel))
+				FMath::RandRange(1, 999999), Difficulty))
 			{
 				ShowCombat();
 			}
@@ -859,6 +1310,8 @@ void AAscendPlayerController::HandleClickAction(const FString& Tag, int32 Index)
 
 void AAscendPlayerController::EnterMapNode(int32 ChoiceIndex)
 {
+	if (!Run || !Run->CurrentChoices.IsValidIndex(ChoiceIndex)) return;
+	PlayAudioEvent(TEXT("map_node"), 0.58f);
 	CurrentEncounter = Run->ChooseOption(ChoiceIndex);
 
 	// 叙事选项处理
@@ -894,10 +1347,11 @@ void AAscendPlayerController::EnterMapNode(int32 ChoiceIndex)
 		RegisterEncounterRuntimeEnemies();
 		CombatLogLines.Reset();
 		LastProcessedLogIndex = 0;
+		LastProcessedEnemyDamageEventIndex = 0;
 
-		if (Combat->StartCombat(Run->State.Deck, CurrentEncounter.EnemyIds, Run->State.RelicIds,
+		if (Combat->StartCombatWithDifficulty(Run->State.Deck, CurrentEncounter.EnemyIds, Run->State.RelicIds,
 			Run->State.MaxHP, Run->State.HP, CurrentEncounter.EnemyHPBonus,
-			FMath::RandRange(1, 999999), CurrentEncounter.EnemyLevel))
+			FMath::RandRange(1, 999999), Run->GetLastCombatDifficulty()))
 		{
 			ShowCombat();
 		}
@@ -947,6 +1401,7 @@ void AAscendPlayerController::FinishCombat()
 {
 	if (Combat->IsVictory())
 	{
+		PlayAudioEvent(TEXT("victory_stinger"), 1.0f, 0.98f, 1.02f);
 		if (Run->State.bInfiniteNarrativeMode)
 		{
 			Run->RecordInfiniteCombatDigest(CurrentEncounter.EnemyIds, Combat->TurnCount,
@@ -975,6 +1430,7 @@ void AAscendPlayerController::FinishCombat()
 	}
 	else
 	{
+		PlayAudioEvent(TEXT("defeat_stinger"), 1.0f, 0.98f, 1.02f);
 		if (Run->State.bInfiniteNarrativeMode)
 		{
 			bDiscardCombatNarrativePrefetch = true;
@@ -988,6 +1444,8 @@ void AAscendPlayerController::FinishCombat()
 
 void AAscendPlayerController::RestartRun()
 {
+	InvalidateInfiniteNarrativeFlow();
+	if (InfiniteNarrativeService) InfiniteNarrativeService->CancelGeneration();
 	ShowTitle();
 }
 
@@ -1012,8 +1470,9 @@ void AAscendPlayerController::SetupInputComponent()
 	InputComponent->BindKey(EKeys::SpaceBar, IE_Pressed, this, &AAscendPlayerController::OnConfirmKey);
 
 #if PLATFORM_ANDROID
-	// Android 使用触摸释放；卡牌按钮自身的 OnReleased 还会提供捕获范围外的兜底。
-	InputComponent->BindKey(EKeys::TouchKeys[ETouchIndex::Touch1], IE_Released, this,
+	// Android 真触摸由 InputTouch 统一处理；部分设备将触摸转成鼠标事件，
+	// 额外保留鼠标释放兜底。卡牌按钮使用 MouseDown/Down，不会捕获移动。
+	InputComponent->BindKey(EKeys::LeftMouseButton, IE_Released, this,
 		&AAscendPlayerController::OnMouseLeftReleased);
 #else
 	// Mac/桌面端保持原有的单一鼠标释放路径。
@@ -1040,6 +1499,60 @@ void AAscendPlayerController::OnConfirmKey()
 void AAscendPlayerController::PlayerTick(float DeltaTime)
 {
 	Super::PlayerTick(DeltaTime);
+	if (ScreenHost && ScreenShakeTrauma > KINDA_SMALL_NUMBER)
+	{
+		ScreenShakeTrauma = FMath::Max(0.f, ScreenShakeTrauma - ScreenShakeDecayRate * DeltaTime);
+		ScreenShakePhase += DeltaTime * 30.f;
+		const float Strength = ScreenShakeTrauma * ScreenShakeTrauma;
+		const float XWave = 0.62f * FMath::Sin(ScreenShakePhase * 1.73f)
+			+ 0.38f * FMath::Sin(ScreenShakePhase * 2.91f + 0.7f);
+		const float YWave = 0.58f * FMath::Sin(ScreenShakePhase * 2.17f + 1.2f)
+			+ 0.42f * FMath::Sin(ScreenShakePhase * 3.37f);
+		ScreenHost->SetRenderTranslation(FVector2D(12.f * Strength * XWave, 8.f * Strength * YWave));
+		if (ScreenShakeTrauma <= KINDA_SMALL_NUMBER)
+			ScreenHost->SetRenderTranslation(FVector2D::ZeroVector);
+	}
+	if (AnimatedHoverCardVisual.IsValid() && AnimatedHoverCardButton.IsValid())
+	{
+		const float Target = bHandHoverTargetVisible ? 1.f : 0.f;
+		HandHoverAnimationAlpha = FMath::FInterpTo(HandHoverAnimationAlpha, Target,
+			DeltaTime, bHandHoverTargetVisible ? 13.f : 18.f);
+		if (FMath::Abs(HandHoverAnimationAlpha - Target) < 0.002f)
+			HandHoverAnimationAlpha = Target;
+		const float Ease = 1.f - FMath::Pow(1.f - HandHoverAnimationAlpha, 3.f);
+#if PLATFORM_ANDROID
+		const float PreviewLift = TouchHandHoverLift;
+#else
+		const float PreviewLift = HandHoverLift;
+#endif
+		// The focus card is rebuilt at its final size in ShowCardPreview.  Only
+		// opacity/translation are animated here; scaling the composed card (even
+		// by a small overshoot) reintroduces intermittent bilinear blur.
+		AnimatedHoverCardVisual->SetRenderTransformAngle(0.f);
+		AnimatedHoverCardVisual->SetRenderTranslation(FVector2D(0.f, -PreviewLift * Ease));
+		AnimatedHoverCardVisual->SetRenderScale(FVector2D(1.f, 1.f));
+		AnimatedHoverCardVisual->SetRenderOpacity(Ease);
+		if (!bHandHoverTargetVisible && HandHoverAnimationAlpha <= 0.f)
+		{
+			AnimatedHoverCardVisual->RemoveFromParent();
+			if (AnimatedHoverCardButton.IsValid())
+			{
+				if (UWidget* OriginalVisual = AnimatedHoverCardButton->GetContent())
+				{
+					OriginalVisual->SetRenderTransformAngle(HoveredCardOriginalAngle);
+					OriginalVisual->SetRenderTranslation(FVector2D::ZeroVector);
+					OriginalVisual->SetRenderScale(FVector2D(1.f, 1.f));
+				}
+				AnimatedHoverCardButton->SetRenderOpacity(1.f);
+				if (UCanvasPanelSlot* Slot = Cast<UCanvasPanelSlot>(AnimatedHoverCardButton->Slot))
+					Slot->SetZOrder(AnimatedHoverCardIndex);
+			}
+			AnimatedHoverCardButton.Reset();
+			AnimatedHoverCardVisual.Reset();
+			AnimatedHoverCardIndex = INDEX_NONE;
+			HoveredCardOriginalAngle = 0.f;
+		}
+	}
 	if (bIsDraggingCard)
 	{
 		UpdateCardDrag();
@@ -1053,6 +1566,144 @@ void AAscendPlayerController::OnMouseLeftReleased()
 	{
 		EndCardDrag();
 	}
+}
+
+bool AAscendPlayerController::InputTouch(const FTouchId TouchId, const ETouchType::Type Type,
+	const FVector2D& TouchLocation, const float Force, const uint64 Timestamp)
+{
+	const bool bHandledByParent = Super::InputTouch(TouchId, Type, TouchLocation, Force, Timestamp);
+
+#if PLATFORM_ANDROID
+	// PlayerController::InputTouch is fed by the viewport independently of Slate/UMG.
+	// That makes it the reliable lifecycle for a drag: SButton may stop receiving
+	// OnReleased once a finger leaves its hit box, while the viewport still reports
+	// every move and the final release. Ignore the synthetic cursor pointer.
+	if (TouchId.GetIndex() < ETouchIndex::CursorPointerIndex)
+	{
+		if (Type == ETouchType::Began)
+		{
+			LastTouchEventIndex = TouchId.GetIndex();
+			bHasLastTouchEvent = true;
+		}
+		if (Type == ETouchType::Began)
+		{
+			const bool bDragAlreadyStartedByButton = bIsDraggingCard && bDragUsingTouch;
+			if (bDragAlreadyStartedByButton)
+			{
+				// UButton::OnPressed may be the first reliable hit-test on Android.
+				// Bind this raw touch to the drag it just started.
+				if (!bHasActiveDragTouch)
+				{
+					ActiveDragTouchIndex = TouchId.GetIndex();
+					bHasActiveDragTouch = true;
+				}
+				return bHandledByParent;
+			}
+			bHasActiveDragTouch = false;
+
+			// Resolve the top-most hand card directly from the same cached hit
+			// geometries that Slate uses, with a scaled fallback for devices
+			// applying viewport DPI. UButton::OnPressed is also wired as a fallback.
+			int32 TouchedCardIndex = INDEX_NONE;
+			if (Combat && Combat->bCombatActive && CurrentScreen == EGameScreen::Combat
+				&& Combat->PendingDiscoverChoices.Num() == 0 && !Combat->bPlayerTurnSkipped)
+			{
+				for (int32 Index = HandCardButtons.Num() - 1; Index >= 0; --Index)
+				{
+					if (!HandCardButtons[Index].IsValid() || !HandCardButtons[Index]->GetIsEnabled()) continue;
+					if (HandCardButtons[Index]->GetCachedGeometry().IsUnderLocation(TouchLocation))
+					{
+						TouchedCardIndex = Index;
+						break;
+					}
+				}
+
+				if (TouchedCardIndex == INDEX_NONE && AnimCanvas)
+				{
+					const FGeometry CanvasGeometry = AnimCanvas->GetTickSpaceGeometry();
+					const FVector2D CanvasSize = CanvasGeometry.GetLocalSize();
+					const FVector2D ViewportSize = GetViewportSize();
+					if (CanvasSize.X > 1.f && CanvasSize.Y > 1.f
+						&& ViewportSize.X > 1.f && ViewportSize.Y > 1.f)
+					{
+						const FVector2D ScaledLocal(
+							TouchLocation.X * CanvasSize.X / ViewportSize.X,
+							TouchLocation.Y * CanvasSize.Y / ViewportSize.Y);
+						const FVector2D ScaledScreen = CanvasGeometry.LocalToAbsolute(ScaledLocal);
+						for (int32 Index = HandCardButtons.Num() - 1; Index >= 0; --Index)
+						{
+							if (!HandCardButtons[Index].IsValid() || !HandCardButtons[Index]->GetIsEnabled()) continue;
+							if (HandCardButtons[Index]->GetCachedGeometry().IsUnderLocation(ScaledScreen))
+							{
+								TouchedCardIndex = Index;
+								break;
+							}
+						}
+					}
+				}
+			}
+
+			if (TouchedCardIndex != INDEX_NONE)
+			{
+				HandleCardPressed(TouchedCardIndex);
+				if (bIsDraggingCard)
+				{
+					ActiveDragTouchIndex = TouchId.GetIndex();
+					bHasActiveDragTouch = true;
+				}
+			}
+		}
+		else if (bIsDraggingCard && bDragUsingTouch
+			&& (!bHasActiveDragTouch || TouchId.GetIndex() == ActiveDragTouchIndex))
+		{
+			// Prefer the same Slate screen coordinates used by the root widget.
+			// If a vendor reports physical pixels while Slate uses logical units,
+			// use the scaled conversion when the direct position is outside Canvas.
+			if (AnimCanvas)
+			{
+				const FGeometry CanvasGeometry = AnimCanvas->GetTickSpaceGeometry();
+				const FVector2D CanvasSize = CanvasGeometry.GetLocalSize();
+				const FVector2D DirectLocal = CanvasGeometry.AbsoluteToLocal(TouchLocation);
+				const bool bDirectInBounds = DirectLocal.X >= -32.f && DirectLocal.Y >= -32.f
+					&& DirectLocal.X <= CanvasSize.X + 32.f && DirectLocal.Y <= CanvasSize.Y + 32.f;
+				if (bDirectInBounds)
+				{
+					HandleRootPointerMoved(TouchLocation);
+				}
+				else
+				{
+					const FVector2D ViewportSize = GetViewportSize();
+					if (CanvasSize.X > 1.f && CanvasSize.Y > 1.f
+						&& ViewportSize.X > 1.f && ViewportSize.Y > 1.f)
+					{
+						const FVector2D ScaledLocal(
+							TouchLocation.X * CanvasSize.X / ViewportSize.X,
+							TouchLocation.Y * CanvasSize.Y / ViewportSize.Y);
+						if (ScaledLocal.X >= -32.f && ScaledLocal.Y >= -32.f
+							&& ScaledLocal.X <= CanvasSize.X + 32.f && ScaledLocal.Y <= CanvasSize.Y + 32.f)
+						{
+							WidgetTouchCanvasPosition = ScaledLocal;
+							bHasWidgetTouchPosition = true;
+						}
+					}
+				}
+			}
+
+			if (Type == ETouchType::Ended)
+			{
+				// Consume the release location before resolving the play zone so a
+				// final move event is never required to play a card.
+				UpdateCardDrag();
+				EndCardDrag();
+				bHasActiveDragTouch = false;
+			}
+		}
+		if (Type == ETouchType::Ended && TouchId.GetIndex() == LastTouchEventIndex)
+			bHasLastTouchEvent = false;
+	}
+#endif
+
+	return bHandledByParent;
 }
 
 FVector2D AAscendPlayerController::GetViewportSize() const
@@ -1153,7 +1804,7 @@ FVector2D AAscendPlayerController::GetEnemyScreenPos(int32 EnemyIndex) const
 	if (!Combat || !Combat->Enemies.IsValidIndex(EnemyIndex)) return FVector2D(600.f, 100.f);
 	FVector2D VP = GetViewportSize();
 	int32 N = Combat->Enemies.Num();
-	float CardW = 150.f;
+	const float CardW = N <= 1 ? 220.f : (N == 2 ? 198.f : (N == 3 ? 176.f : 158.f));
 	float Gap = 16.f;
 	float TotalW = N * CardW + (N - 1) * Gap;
 	float StartX = (VP.X - TotalW) * 0.5f;
@@ -1166,17 +1817,11 @@ FVector2D AAscendPlayerController::GetEnemyScreenPos(int32 EnemyIndex) const
 	float VH = AG.GetLocalSize().Y;
 	float HPad = 12.f; // VerticalBox slot padding (6 each side)
 	float HBoxLeft = HPad * 0.5f; // 6
-	float CardSlotW = CardW + Gap; // 166
+	float CardSlotW = CardW + Gap;
 	float TotalLog = N * CardSlotW;
 	float FillW = (VW - HPad - TotalLog) * 0.5f;
 	float XLog = HBoxLeft + FillW + EnemyIndex * CardSlotW + 8.f + CardW * 0.5f;
 	FVector2D LogicalPos(XLog, VH * 0.18f);
-
-	UE_LOG(LogTemp, Display, TEXT("[ENEMYPOS] idx=%d VP=%.0f,%.0f canvasLocal=%.0f,%.0f logical=%.0f,%.0f"),
-		EnemyIndex, ViewportPos.X, ViewportPos.Y,
-		AG.AbsoluteToLocal(ViewportPos + AG.GetAbsolutePosition()).X,
-		AG.AbsoluteToLocal(ViewportPos + AG.GetAbsolutePosition()).Y,
-		LogicalPos.X, LogicalPos.Y);
 
 	return LogicalPos;
 }
@@ -1198,7 +1843,7 @@ UWidget* AAscendPlayerController::MakeCardContent(UObject* Outer, int32 CardInde
 			? Card.Data.UpgradedDescription : Card.Data.Description;
 		if (Card.Data.Id == TEXT("one_sword"))
 		{
-			FixedDescription = FString::Printf(TEXT("对所有敌人造成 %d 点伤害（每层强化+6）。保留，消失"),
+			FixedDescription = FString::Printf(TEXT("对所有敌人造成 %d 点伤害（每层强化+3）。保留，消失"),
 				Combat->GetOneSwordDamage());
 		}
 		else if (Card.Data.Id == TEXT("wan_jian_gui_zong"))
@@ -1377,7 +2022,7 @@ UWidget* AAscendPlayerController::MakeCardContent(UObject* Outer, int32 CardInde
 	if (Card.Data.Id == TEXT("one_sword") && Combat)
 	{
 		const int32 TotalDmg = Combat->GetOneSwordDamage();
-		DisplayDesc = FString::Printf(TEXT("对所有敌人造成 %d 点伤害（每层强化+6）。保留，消失"), TotalDmg);
+		DisplayDesc = FString::Printf(TEXT("对所有敌人造成 %d 点伤害（每层强化+3）。保留，消失"), TotalDmg);
 	}
 	else if (Card.Data.Id == TEXT("wan_jian_gui_zong") && Combat)
 	{
@@ -1611,7 +2256,7 @@ UWidget* AAscendPlayerController::MakeCardContentFromData(UObject* Outer, const 
 }
 
 // -----------------------------------------------------------
-// 手牌悬停放大（原牌立正、竖直上抬，不创建额外预览牌）
+// 手牌悬停放大（原牌保留命中区，焦点层按最终尺寸重建并立正上抬）
 // -----------------------------------------------------------
 
 void AAscendPlayerController::ShowCardPreview(int32 CardIndex)
@@ -1619,33 +2264,84 @@ void AAscendPlayerController::ShowCardPreview(int32 CardIndex)
 	if (!Combat || !Combat->Hand.IsValidIndex(CardIndex)) return;
 	if (!HandCardButtons.IsValidIndex(CardIndex) || !HandCardButtons[CardIndex].IsValid()) return;
 	if (bIsDraggingCard) return; // 拖拽时不弹预览
-
-	HideCardPreview();
+	if (!AnimCanvas) return;
 
 	UButton* HoveredCard = HandCardButtons[CardIndex].Get();
 	UWidget* CardVisual = HoveredCard->GetContent();
 	if (!CardVisual) return;
+	if (AnimatedHoverCardVisual.IsValid() && AnimatedHoverCardVisual.Get() != CardVisual)
+	{
+		// The previous focus layer is a separate crisp rebuild. Remove it before
+		// creating the new one and restore the original fan card underneath.
+		AnimatedHoverCardVisual->RemoveFromParent();
+		if (AnimatedHoverCardButton.IsValid())
+		{
+			if (UWidget* OriginalVisual = AnimatedHoverCardButton->GetContent())
+			{
+				OriginalVisual->SetRenderTransformAngle(HoveredCardOriginalAngle);
+				OriginalVisual->SetRenderTranslation(FVector2D::ZeroVector);
+				OriginalVisual->SetRenderScale(FVector2D(1.f, 1.f));
+			}
+			AnimatedHoverCardButton->SetRenderOpacity(1.f);
+			if (UCanvasPanelSlot* OldSlot = Cast<UCanvasPanelSlot>(AnimatedHoverCardButton->Slot))
+				OldSlot->SetZOrder(AnimatedHoverCardIndex);
+		}
+		AnimatedHoverCardButton.Reset();
+		AnimatedHoverCardVisual.Reset();
+		AnimatedHoverCardIndex = INDEX_NONE;
+	}
 
 	HoveredCardIndex = CardIndex;
 	HoveredCardOriginalAngle = CardVisual->GetRenderTransform().Angle;
-#if PLATFORM_ANDROID
-	const float PreviewScale = TouchHandHoverScale;
-	const float PreviewLift = TouchHandHoverLift;
-#else
-	const float PreviewScale = HandHoverScale;
-	const float PreviewLift = HandHoverLift;
-#endif
-	// 若鼠标在入场动画尚未结束时进入，立即固定按钮命中区域到最终位置。
+	AnimatedHoverCardButton = HoveredCard;
+	AnimatedHoverCardIndex = CardIndex;
+	HandHoverAnimationAlpha = 0.f;
+	bHandHoverTargetVisible = true;
+
+	// Rebuild at the complete focus size.  This avoids enlarging the small
+	// hand-layout card through RenderScale and guarantees that title/description
+	// text is rasterized once at a discrete final font size.
+	#if PLATFORM_ANDROID
+	const float FocusScale = CurrentHandCardScale * TouchHandHoverScale;
+	#else
+	const float FocusScale = CurrentHandCardScale * HandHoverScale;
+	#endif
+	const FVector2D FocusSize(
+		SnapCardPixel(AscendCardLayout::Width * FocusScale),
+		SnapCardPixel(AscendCardLayout::Height * FocusScale));
+	UButton* FocusCard = NewObject<UButton>(AnimCanvas);
+	FocusCard->SetBackgroundColor(FLinearColor::Transparent);
+	BuildCardWidget(FocusCard, CardIndex, true, FocusScale);
+	FocusCard->SetVisibility(ESlateVisibility::HitTestInvisible);
+	FocusCard->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
+	FocusCard->SetRenderTransformAngle(0.f);
+	FocusCard->SetRenderScale(FVector2D(1.f, 1.f));
+	FocusCard->SetRenderOpacity(0.f);
+
+	FGeometry CanvasGeometry = AnimCanvas->GetTickSpaceGeometry();
+	FGeometry CardGeometry = HoveredCard->GetCachedGeometry();
+	FVector2D BasePosition = CanvasGeometry.AbsoluteToLocal(CardGeometry.GetAbsolutePosition());
+	FVector2D BaseSize = CardGeometry.GetLocalSize();
+	if (BaseSize.X < 1.f || BaseSize.Y < 1.f)
+		BaseSize = FVector2D(
+			SnapCardPixel(AscendCardLayout::Width * CurrentHandCardScale),
+			SnapCardPixel(AscendCardLayout::Height * CurrentHandCardScale));
+	FVector2D FocusPosition = BasePosition + BaseSize * 0.5f - FocusSize * 0.5f;
+	FocusPosition.X = SnapCardPixel(FocusPosition.X);
+	FocusPosition.Y = SnapCardPixel(FocusPosition.Y);
+	if (UCanvasPanelSlot* FocusSlot = AnimCanvas->AddChildToCanvas(FocusCard))
+	{
+		FocusSlot->SetPosition(FocusPosition);
+		FocusSlot->SetSize(FocusSize);
+		FocusSlot->SetZOrder(HandHoverZOrder);
+	}
+	AnimatedHoverCardVisual = FocusCard;
+
+	// 若鼠标在入场动画尚未结束时进入，立即固定按钮命中区域到最终位置；
+	// 原按钮仍负责命中测试，焦点层本身是 HitTestInvisible。
 	HoveredCard->SetRenderTranslation(FVector2D::ZeroVector);
 	HoveredCard->SetRenderScale(FVector2D(1.f, 1.f));
-	HoveredCard->SetRenderOpacity(1.f);
-	CardVisual->SetRenderTransformAngle(0.f);
-	CardVisual->SetRenderTranslation(FVector2D(0.f, -PreviewLift));
-	CardVisual->SetRenderScale(FVector2D(PreviewScale, PreviewScale));
-	if (UCanvasPanelSlot* Slot = Cast<UCanvasPanelSlot>(HoveredCard->Slot))
-	{
-		Slot->SetZOrder(HandHoverZOrder);
-	}
+	HoveredCard->SetRenderOpacity(0.f);
 }
 
 void AAscendPlayerController::HideCardPreview(int32 CardIndex)
@@ -1653,22 +2349,8 @@ void AAscendPlayerController::HideCardPreview(int32 CardIndex)
 	// 快速扫过重叠手牌时，旧卡的 Unhover 不应取消新卡的悬停状态。
 	if (CardIndex != INDEX_NONE && HoveredCardIndex != CardIndex) return;
 
-	if (HandCardButtons.IsValidIndex(HoveredCardIndex) && HandCardButtons[HoveredCardIndex].IsValid())
-	{
-		UButton* HoveredCard = HandCardButtons[HoveredCardIndex].Get();
-		if (UWidget* CardVisual = HoveredCard->GetContent())
-		{
-			CardVisual->SetRenderTransformAngle(HoveredCardOriginalAngle);
-			CardVisual->SetRenderTranslation(FVector2D::ZeroVector);
-			CardVisual->SetRenderScale(FVector2D(1.f, 1.f));
-		}
-		if (UCanvasPanelSlot* Slot = Cast<UCanvasPanelSlot>(HoveredCard->Slot))
-		{
-			Slot->SetZOrder(HoveredCardIndex);
-		}
-	}
+	bHandHoverTargetVisible = false;
 	HoveredCardIndex = INDEX_NONE;
-	HoveredCardOriginalAngle = 0.f;
 }
 
 void AAscendPlayerController::BuildEnemyCardWidget(UVerticalBox* EBox, int32 EnemyIndex, bool bIsLocked)
@@ -1677,9 +2359,13 @@ void AAscendPlayerController::BuildEnemyCardWidget(UVerticalBox* EBox, int32 Ene
 	const FEnemyCombatant& E = Combat->Enemies[EnemyIndex];
 	const bool bAlive = E.State.IsAlive();
 
+	const int32 EnemyCount = Combat->Enemies.Num();
+	const float CardWidth = EnemyCount <= 1 ? 220.f : (EnemyCount == 2 ? 198.f : (EnemyCount == 3 ? 176.f : 158.f));
+	const float CardHeight = CardWidth * 1.40f;
+	const float InfoScale = CardWidth / 150.f;
 	USizeBox* Sizer = NewObject<USizeBox>(EBox);
-	Sizer->SetWidthOverride(150.f);
-	Sizer->SetHeightOverride(210.f);
+	Sizer->SetWidthOverride(CardWidth);
+	Sizer->SetHeightOverride(CardHeight);
 
 	UOverlay* EnemyRoot = NewObject<UOverlay>(Sizer);
 	if (UImage* FrameArt = FAscendArt::MakeImage(EnemyRoot, TEXT("Art/ui/card_frame.png")))
@@ -1738,7 +2424,8 @@ void AAscendPlayerController::BuildEnemyCardWidget(UVerticalBox* EBox, int32 Ene
 	TextBg->SetBrushColor(FLinearColor::Transparent);
 	UVerticalBox* TV = NewObject<UVerticalBox>(TextBg);
 
-	UTextBlock* NameT = FAscendUIStyle::MakeText(TV, E.State.Name, 14,
+	UTextBlock* NameT = FAscendUIStyle::MakeText(TV, E.State.Name,
+		FMath::RoundToInt(14.f * InfoScale),
 		bAlive ? FAscendUIStyle::BloodRed() : FAscendUIStyle::DimGray());
 	NameT->SetJustification(ETextJustify::Center);
 	TV->AddChildToVerticalBox(NameT);
@@ -1750,7 +2437,7 @@ void AAscendPlayerController::BuildEnemyCardWidget(UVerticalBox* EBox, int32 Ene
 
 	UTextBlock* HPT = FAscendUIStyle::MakeText(TV,
 		FString::Printf(TEXT("%d/%d  罡气 %d"), E.State.HP, E.State.MaxHP, E.State.Block),
-		12, FAscendUIStyle::PaperWhite());
+		FMath::RoundToInt(12.f * InfoScale), FAscendUIStyle::PaperWhite());
 	HPT->SetJustification(ETextJustify::Center);
 	TV->AddChildToVerticalBox(HPT);
 
@@ -1792,11 +2479,12 @@ void AAscendPlayerController::BuildEnemyCardWidget(UVerticalBox* EBox, int32 Ene
 		IntentRow->AddChildToHorizontalBox(NewObject<USpacer>(TV))->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
 
 		USizeBox* BadgeSize = NewObject<USizeBox>(IntentRow);
-		BadgeSize->SetWidthOverride(18.f);
-		BadgeSize->SetHeightOverride(18.f);
+		BadgeSize->SetWidthOverride(22.f * InfoScale);
+		BadgeSize->SetHeightOverride(22.f * InfoScale);
 		UBorder* Badge = NewObject<UBorder>(BadgeSize);
 		Badge->SetBrushColor(BadgeCol);
-		UTextBlock* GlyphT = FAscendUIStyle::MakeText(Badge, Glyph, 11, FAscendUIStyle::PaperWhite());
+		UTextBlock* GlyphT = FAscendUIStyle::MakeText(Badge, Glyph,
+			FMath::RoundToInt(11.f * InfoScale), FAscendUIStyle::PaperWhite());
 		GlyphT->SetJustification(ETextJustify::Center);
 		Badge->SetContent(GlyphT);
 		BadgeSize->SetContent(Badge);
@@ -1804,7 +2492,8 @@ void AAscendPlayerController::BuildEnemyCardWidget(UVerticalBox* EBox, int32 Ene
 
 		if (!ValStr.IsEmpty())
 		{
-			UTextBlock* ValT = FAscendUIStyle::MakeText(IntentRow, ValStr, 12, FAscendUIStyle::GoldYellow());
+			UTextBlock* ValT = FAscendUIStyle::MakeText(IntentRow, ValStr,
+				FMath::RoundToInt(12.f * InfoScale), FAscendUIStyle::GoldYellow());
 			UHorizontalBoxSlot* ValSlot = IntentRow->AddChildToHorizontalBox(ValT);
 			ValSlot->SetPadding(FMargin(4.f, 1.f, 0.f, 0.f));
 		}
@@ -1812,7 +2501,8 @@ void AAscendPlayerController::BuildEnemyCardWidget(UVerticalBox* EBox, int32 Ene
 		TV->AddChildToVerticalBox(IntentRow)->SetPadding(FMargin(0.f, 2.f, 0.f, 1.f));
 	}
 
-	if (UHorizontalBox* StatusRow = BuildStatusRow(TV, E.State))
+	if (UHorizontalBox* StatusRow = BuildStatusRow(TV, E.State,
+		FMath::RoundToInt(10.f * InfoScale)))
 	{
 		TV->AddChildToVerticalBox(StatusRow)->SetPadding(FMargin(0.f, 2.f));
 	}
@@ -1820,7 +2510,8 @@ void AAscendPlayerController::BuildEnemyCardWidget(UVerticalBox* EBox, int32 Ene
 	// 特殊机制说明（小字，灰金色）
 	if (!E.Data.AbilityDesc.IsEmpty())
 	{
-		UTextBlock* AbilT = FAscendUIStyle::MakeText(TV, E.Data.AbilityDesc, 8,
+		UTextBlock* AbilT = FAscendUIStyle::MakeText(TV, E.Data.AbilityDesc,
+			FMath::Max(9, FMath::RoundToInt(8.f * InfoScale)),
 			FSlateColor(FLinearColor(0.55f, 0.48f, 0.36f)));
 		AbilT->SetAutoWrapText(true);
 		AbilT->SetJustification(ETextJustify::Center);
@@ -1889,16 +2580,23 @@ void AAscendPlayerController::HandleCardPressed(int32 CardIndex)
 
 	UE_LOG(LogTemp, Display, TEXT("[PRESS] card=%d bIsDragging=%d"), CardIndex, bIsDraggingCard);
 
-	// Already dragging → cancel current drag (snap back)
+	// A touch can arrive through both UButton::OnPressed and the viewport
+	// lifecycle. Ignore that duplicate for the same card; a second card press
+	// still cancels the current drag as before.
 	if (bIsDraggingCard)
 	{
+		if (DragCardIndex == CardIndex) return;
 		EndCardDrag();
 		return;
 	}
 
 	HideCardPreview();
 
-	if (Combat->GetEffectiveCost(Combat->Hand[CardIndex]) > Combat->Spirit) return;
+	if (Combat->GetEffectiveCost(Combat->Hand[CardIndex]) > Combat->Spirit)
+	{
+		PlayAudioEvent(TEXT("ui_deny"), 0.8f);
+		return;
+	}
 
 	FVector2D PointerPosition = FVector2D::ZeroVector;
 	bool bTouchPressed = false;
@@ -1928,6 +2626,14 @@ void AAscendPlayerController::HandleCardPressed(int32 CardIndex)
 	DraggedCardWidget = nullptr;
 	bDragUsingTouch = bTouchPressed;
 	bHasWidgetTouchPosition = false;
+	if (bDragUsingTouch && !bHasActiveDragTouch && bHasLastTouchEvent)
+	{
+		// When UButton::OnPressed wins the race with InputTouch::Began, retain
+		// the finger identity recorded by the viewport event.
+		ActiveDragTouchIndex = LastTouchEventIndex;
+		bHasActiveDragTouch = true;
+	}
+	PlayAudioEvent(TEXT("card_pick"), 0.58f, 0.99f, 1.01f);
 	DragStartMousePos = bHasPointer ? PointerPosition : FVector2D::ZeroVector;
 	if (bDragUsingTouch && AnimCanvas && HandCardButtons.IsValidIndex(CardIndex)
 		&& HandCardButtons[CardIndex].IsValid())
@@ -1946,8 +2652,76 @@ void AAscendPlayerController::UpdateCardDrag()
 	bool bTouchPressed = false;
 	if (bDragUsingTouch)
 	{
-		// 触摸拖牌只信任 UMG PointerEvent。未收到真实移动事件时保持原牌放大，
-		// 绝不根据 Android 的兼容鼠标/伪 Touch(0,0) 创建幽灵牌。
+		// Android 的 UMG 触点可能被卡牌按钮捕获，导致 RootWidget 收不到
+		// TouchMoved。每帧从 PlayerInput 读取当前手指位置，彻底绕过 Slate
+		// 的冒泡/捕获；InputTouch/RootWidget 仍作为事件驱动的低延迟更新。
+		FVector2D PolledTouchViewportPosition = FVector2D::ZeroVector;
+		bool bFoundPolledTouch = false;
+		ETouchIndex::Type PolledTouchIndex = ActiveDragTouchIndex;
+		auto TryReadTouch = [this](ETouchIndex::Type TouchIndex, FVector2D& OutPosition, bool bAcceptUnpressed)
+		{
+			float X = 0.f;
+			float Y = 0.f;
+			bool bPressed = false;
+			GetInputTouchState(TouchIndex, X, Y, bPressed);
+			if ((!bPressed && !bAcceptUnpressed) || !FMath::IsFinite(X) || !FMath::IsFinite(Y)) return false;
+			// Some Android input layers expose an unused Touch1 at (0,0). A card
+			// cannot start there, so ignore that slot instead of snapping the drag.
+			if (X <= 2.f && Y <= 2.f) return false;
+			OutPosition = FVector2D(X, Y);
+			return true;
+		};
+
+		if (bHasActiveDragTouch)
+		{
+			bFoundPolledTouch = TryReadTouch(ActiveDragTouchIndex, PolledTouchViewportPosition, true);
+		}
+		if (!bFoundPolledTouch)
+		{
+			for (int32 TouchIndex = 0; TouchIndex < EKeys::NUM_TOUCH_KEYS; ++TouchIndex)
+			{
+				if (TryReadTouch(static_cast<ETouchIndex::Type>(TouchIndex), PolledTouchViewportPosition, false))
+				{
+					bFoundPolledTouch = true;
+					PolledTouchIndex = static_cast<ETouchIndex::Type>(TouchIndex);
+					break;
+				}
+			}
+		}
+		if (bFoundPolledTouch && !bHasActiveDragTouch)
+		{
+			// If UButton started the drag before PlayerController::InputTouch
+			// receives Began, bind the currently pressed finger on this first tick.
+			ActiveDragTouchIndex = PolledTouchIndex;
+			bHasActiveDragTouch = true;
+		}
+
+		if (bFoundPolledTouch && AnimCanvas)
+		{
+			const FGeometry CanvasGeometry = AnimCanvas->GetTickSpaceGeometry();
+			const FVector2D CanvasSize = CanvasGeometry.GetLocalSize();
+			const FVector2D ViewportSize = GetViewportSize();
+			if (CanvasSize.X > 1.f && CanvasSize.Y > 1.f
+				&& ViewportSize.X > 1.f && ViewportSize.Y > 1.f)
+			{
+				// GetInputTouchState is viewport-relative; Canvas is DPI-scaled.
+				// Convert by ratio so the finger delta matches the rendered card.
+				const FVector2D PolledCanvasPosition(
+					PolledTouchViewportPosition.X * CanvasSize.X / ViewportSize.X,
+					PolledTouchViewportPosition.Y * CanvasSize.Y / ViewportSize.Y);
+				if (FMath::IsFinite(PolledCanvasPosition.X) && FMath::IsFinite(PolledCanvasPosition.Y)
+					&& PolledCanvasPosition.X >= -64.f && PolledCanvasPosition.Y >= -64.f
+					&& PolledCanvasPosition.X <= CanvasSize.X + 64.f
+					&& PolledCanvasPosition.Y <= CanvasSize.Y + 64.f)
+				{
+					WidgetTouchCanvasPosition = PolledCanvasPosition;
+					bHasWidgetTouchPosition = true;
+				}
+			}
+		}
+
+		// Keep the last valid event position for the release frame, when
+		// GetInputTouchState has already changed the finger to "not pressed".
 		if (!bHasWidgetTouchPosition) return;
 		MousePos = WidgetTouchCanvasPosition;
 		bTouchPressed = true;
@@ -1965,6 +2739,28 @@ void AAscendPlayerController::UpdateCardDrag()
 			return;
 		}
 		HideCardPreview();
+		// Dragging must not leave the fading focus layer above the drag ghost. A
+		// drag is an explicit state transition, so complete the hover teardown
+		// immediately while preserving the original fan card underneath.
+		if (AnimatedHoverCardVisual.IsValid())
+			AnimatedHoverCardVisual->RemoveFromParent();
+		if (AnimatedHoverCardButton.IsValid())
+		{
+			if (UWidget* OriginalVisual = AnimatedHoverCardButton->GetContent())
+			{
+				OriginalVisual->SetRenderTransformAngle(HoveredCardOriginalAngle);
+				OriginalVisual->SetRenderTranslation(FVector2D::ZeroVector);
+				OriginalVisual->SetRenderScale(FVector2D(1.f, 1.f));
+			}
+			// This may be a different card from the one that started the drag when
+			// the pointer crossed overlapping fan cards. Restore it; the actual drag
+			// card is hidden explicitly below by DragCardIndex.
+			AnimatedHoverCardButton->SetRenderOpacity(1.f);
+		}
+		AnimatedHoverCardButton.Reset();
+		AnimatedHoverCardVisual.Reset();
+		AnimatedHoverCardIndex = INDEX_NONE;
+		HandHoverAnimationAlpha = 0.f;
 
 		int32 NCards = Combat->Hand.Num();
 		FVector2D VP = GetViewportSize();
@@ -2005,8 +2801,15 @@ void AAscendPlayerController::UpdateCardDrag()
 		UE_LOG(LogTemp, Display, TEXT("[DRAG] VP=%.0fx%.0f NCards=%d HandLocal=%.0f,%.0f"),
 			VP.X, VP.Y, NCards, HandLocal.X, HandLocal.Y);
 
+		const float DragVisualScale = GetDragCardScale(CurrentHandCardScale, bDragUsingTouch);
+		const FVector2D DragVisualSize(
+			SnapCardPixel(AscendCardLayout::Width * DragVisualScale),
+			SnapCardPixel(AscendCardLayout::Height * DragVisualScale));
+		const FVector2D DragBorderSize = DragVisualSize + FVector2D(6.f, 6.f);
 		UButton* Ghost = NewObject<UButton>(AnimCanvas);
-		BuildCardWidget(Ghost, DragCardIndex, true, CurrentHandCardScale);
+		// Build the drag ghost directly at its final size.  The highlight border
+		// adds a fixed 3px inset, but neither it nor the card is RenderScaled.
+		BuildCardWidget(Ghost, DragCardIndex, true, DragVisualScale);
 
 		// Wrap in highlight border
 		UBorder* HBorder = NewObject<UBorder>(AnimCanvas);
@@ -2015,14 +2818,16 @@ void AAscendPlayerController::UpdateCardDrag()
 		HBorder->SetContent(Ghost);
 		GhostHighlightBorder = HBorder;
 		DraggedCardWidget = HBorder;
+		PlayAudioEvent(TEXT("card_drag"), 0.52f, 0.98f, 1.02f);
 
 		UCanvasPanelSlot* Slot = AnimCanvas->AddChildToCanvas(HBorder);
-		Slot->SetPosition(HandLocal);
-		Slot->SetAutoSize(true);
-		const float DragScale = bDragUsingTouch ? TouchDragScale : MouseDragScale;
+		const FVector2D BaseCardSize = FVector2D(CardW, CardH);
+		const FVector2D BaseCenter = HandLocal + BaseCardSize * 0.5f;
+		Slot->SetPosition(BaseCenter - DragBorderSize * 0.5f);
+		Slot->SetSize(DragBorderSize);
+		Slot->SetAutoSize(false);
 		const float DragLift = bDragUsingTouch ? 54.f : 35.f;
 		HBorder->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
-		HBorder->SetRenderScale(FVector2D(DragScale, DragScale));
 		HBorder->SetRenderTranslation(FVector2D(0.f, -DragLift));
 		HBorder->SetRenderOpacity(0.92f);
 
@@ -2034,14 +2839,14 @@ void AAscendPlayerController::UpdateCardDrag()
 	{
 		if (UCanvasPanelSlot* Slot = Cast<UCanvasPanelSlot>(DraggedCardWidget->Slot))
 		{
+			const float DragVisualScale = GetDragCardScale(CurrentHandCardScale, bDragUsingTouch);
 			const FVector2D CardHalfSize(
-				AscendCardLayout::HalfWidth * CurrentHandCardScale,
-				AscendCardLayout::HalfHeight * CurrentHandCardScale);
+				SnapCardPixel(AscendCardLayout::HalfWidth * DragVisualScale + 3.f),
+				SnapCardPixel(AscendCardLayout::HalfHeight * DragVisualScale + 3.f));
 			Slot->SetPosition(MousePos - CardHalfSize);
 		}
-		const float DragScale = bDragUsingTouch ? TouchDragScale : MouseDragScale;
 		const float DragLift = bDragUsingTouch ? 54.f : 35.f;
-		DraggedCardWidget->SetRenderScale(FVector2D(DragScale, DragScale));
+		DraggedCardWidget->SetRenderScale(FVector2D(1.f, 1.f));
 		DraggedCardWidget->SetRenderTranslation(FVector2D(0.f, -DragLift));
 		DragLastCardCenter = MousePos;
 
@@ -2091,6 +2896,8 @@ void AAscendPlayerController::EndCardDrag()
 {
 	if (!bIsDraggingCard) return;
 	bIsDraggingCard = false;
+	bHasActiveDragTouch = false;
+	bHasLastTouchEvent = false;
 	HideAttackLine();
 
 	// Restore original card button opacity
@@ -2106,7 +2913,9 @@ void AAscendPlayerController::EndCardDrag()
 		float CardCenterY = 0.f;
 		if (UCanvasPanelSlot* S = Cast<UCanvasPanelSlot>(DraggedCardWidget->Slot))
 		{
-			CardCenterY = S->GetPosition().Y + AscendCardLayout::HalfHeight * CurrentHandCardScale;
+			const float DragVisualScale = GetDragCardScale(CurrentHandCardScale, bDragUsingTouch);
+			CardCenterY = S->GetPosition().Y
+				+ SnapCardPixel(AscendCardLayout::HalfHeight * DragVisualScale + 3.f);
 		}
 		// Outside hand zone → play。DraggedCardWidget 的位置也是 Canvas 局部坐标。
 		FGeometry AG = AnimCanvas->GetTickSpaceGeometry();
@@ -2151,13 +2960,18 @@ void AAscendPlayerController::EndCardDrag()
 			{
 				bCombatEndPending = true;
 				bInputLocked = true;
-				TriggerCombatAnimations(TEXT("card"));
 				if (GetWorld())
 				{
 					PlayCardVisual(PlayedCard, PlayTarget);
 					TriggerCombatAnimations(TEXT("card"));
+					const FString FinisherAnimation = AscendCardVisual::ResolveAnimation(PlayedCard);
+					const float FinishDelay = FinisherAnimation == TEXT("greatsword") ? 1.08f
+						: (FinisherAnimation == TEXT("myriad_swords") ? 1.12f
+							: (FinisherAnimation == TEXT("sword_wave") || FinisherAnimation == TEXT("thunder") ? 0.82f
+								: ((FinisherAnimation == TEXT("flame_burst") || FinisherAnimation == TEXT("poison"))
+									? 0.72f : 0.66f)));
 					GetWorld()->GetTimerManager().SetTimer(CombatEndTimer, this,
-						&AAscendPlayerController::FinishCombatDelayed, 0.6f, false);
+						&AAscendPlayerController::FinishCombatDelayed, FinishDelay, false);
 				}
 				return;
 			}
@@ -2167,6 +2981,8 @@ void AAscendPlayerController::EndCardDrag()
 			return;
 		}
 	}
+	if (!bPlayCard)
+		PlayAudioEvent(TEXT("card_invalid"), 0.52f);
 
 	// Snap back animation: brief translate to hand position then show panel
 	bDragUsingTouch = false;
@@ -2197,18 +3013,39 @@ void AAscendPlayerController::SetLockedTarget(int32 EnemyIndex)
 
 void AAscendPlayerController::ShowAttackLine(int32 EnemyIndex)
 {
-	HideAttackLine();
-	if (!AnimCanvas || !DraggedCardWidget) return;
+	if (!AnimCanvas || !DraggedCardWidget || !GetWorld()) return;
 
 	FVector2D CardPos(0.f);
 	if (UCanvasPanelSlot* CS = Cast<UCanvasPanelSlot>(DraggedCardWidget->Slot))
+	{
+		const float DragVisualScale = GetDragCardScale(CurrentHandCardScale, bDragUsingTouch);
 		CardPos = CS->GetPosition() + FVector2D(
-			AscendCardLayout::HalfWidth * CurrentHandCardScale,
-			AscendCardLayout::HalfHeight * CurrentHandCardScale);
+			SnapCardPixel(AscendCardLayout::HalfWidth * DragVisualScale + 3.f),
+			SnapCardPixel(AscendCardLayout::HalfHeight * DragVisualScale + 3.f));
+	}
 	FVector2D EnemyPos = GetEnemyScreenPos(EnemyIndex);
 	FVector2D Delta = EnemyPos - CardPos;
 	float Len = Delta.Size();
-	if (Len < 1.f) return;
+	if (Len < 1.f)
+	{
+		HideAttackLine();
+		return;
+	}
+
+	// 鼠标移动事件可能远高于帧率。几何变化很小时直接复用现有线条，
+	// 连续拖动时最多 30Hz 更新位置，避免每次 Tick 创建/销毁 51 个 UBorder。
+	const double Now = FPlatformTime::Seconds();
+	const bool bHasCachedLine = AttackLineSegments.Num() == 51 && AttackLineEnemyIndex >= 0;
+	if (bHasCachedLine && AttackLineEnemyIndex == EnemyIndex
+		&& FVector2D::Distance(CardPos, AttackLineLastCardPosition) < 6.f
+		&& FVector2D::Distance(EnemyPos, AttackLineLastEnemyPosition) < 3.f)
+	{
+		return;
+	}
+	if (bHasCachedLine && Now - AttackLineLastBuildTime < (1.0 / 30.0))
+	{
+		return;
+	}
 
 	// Quadratic Bezier control point
 	FVector2D Mid = (CardPos + EnemyPos) * 0.5f;
@@ -2218,22 +3055,39 @@ void AAscendPlayerController::ShowAttackLine(int32 EnemyIndex)
 	FVector2D P1 = Mid + Perp * 40.f;
 	FVector2D P2 = EnemyPos;
 
-	auto MakeSeg = [&](FVector2D From, FVector2D To, FLinearColor Color, float Thick, FVector2D Offset)
+	const bool bRestartSpring = !bHasCachedLine || AttackLineEnemyIndex != EnemyIndex;
+	auto SetSeg = [&](int32 SegmentIndex, FVector2D From, FVector2D To, FLinearColor Color, float Thick, FVector2D Offset)
 	{
 		FVector2D D = To - From;
 		float L = D.Size();
-		if (L < 0.5f) return;
-		float A = FMath::RadiansToDegrees(FMath::Atan2(D.Y, D.X));
-		UBorder* Seg = NewObject<UBorder>(AnimCanvas);
+		if (!AttackLineSegments.IsValidIndex(SegmentIndex))
+		{
+			UBorder* NewSeg = NewObject<UBorder>(AnimCanvas);
+			AttackLineSegments.Add(NewSeg);
+		}
+		UBorder* Seg = AttackLineSegments[SegmentIndex];
+		if (!Seg) return;
+		if (Seg->GetParent() != AnimCanvas)
+		{
+			if (Seg->GetParent()) Seg->RemoveFromParent();
+			AnimCanvas->AddChildToCanvas(Seg);
+		}
+		if (!ActiveAnimations.Contains(Seg)) ActiveAnimations.Add(Seg);
+		Seg->SetVisibility(ESlateVisibility::Visible);
 		Seg->SetBrushColor(Color);
-		UCanvasPanelSlot* S = AnimCanvas->AddChildToCanvas(Seg);
+		if (L < 0.5f)
+		{
+			Seg->SetVisibility(ESlateVisibility::Collapsed);
+			return;
+		}
+		float A = FMath::RadiansToDegrees(FMath::Atan2(D.Y, D.X));
+		UCanvasPanelSlot* S = Cast<UCanvasPanelSlot>(Seg->Slot);
+		if (!S) return;
 		S->SetPosition((From + To) * 0.5f - FVector2D(0.f, Thick * 0.5f) + Offset);
 		S->SetSize(FVector2D(L, Thick));
 		S->SetAutoSize(false);
 		S->SetZOrder(9999);
 		Seg->SetRenderTransformAngle(A);
-		AttackLineSegments.Add(Seg);
-		ActiveAnimations.Add(Seg);
 	};
 
 	auto Bezier = [&](float t) -> FVector2D
@@ -2252,7 +3106,7 @@ void AAscendPlayerController::ShowAttackLine(int32 EnemyIndex)
 	{
 		float t0 = (float)i / NumSegs;
 		float t1 = (float)(i + 1) / NumSegs;
-		MakeSeg(Bezier(t0), Bezier(t1), ShadowColor, 14.f, ShadowOff);
+		SetSeg(i, Bezier(t0), Bezier(t1), ShadowColor, 14.f, ShadowOff);
 	}
 
 	// Main curve
@@ -2260,7 +3114,7 @@ void AAscendPlayerController::ShowAttackLine(int32 EnemyIndex)
 	{
 		float t0 = (float)i / NumSegs;
 		float t1 = (float)(i + 1) / NumSegs;
-		MakeSeg(Bezier(t0), Bezier(t1), MainColor, 10.f, FVector2D::ZeroVector);
+		SetSeg(NumSegs + i, Bezier(t0), Bezier(t1), MainColor, 10.f, FVector2D::ZeroVector);
 	}
 
 	// Arrowhead: short spine + two wings forming a crisp arrow tip
@@ -2274,40 +3128,49 @@ void AAscendPlayerController::ShowAttackLine(int32 EnemyIndex)
 		float WingThick = 7.f;
 		FVector2D ArrowTip = P2;
 		// Spine
-		MakeSeg(ArrowTip - AD * SpineLen, ArrowTip, ArrowColor, SpineThick, FVector2D::ZeroVector);
+		SetSeg(48, ArrowTip - AD * SpineLen, ArrowTip, ArrowColor, SpineThick, FVector2D::ZeroVector);
 		// Wings
 		for (float Sign : {-1.f, 1.f})
 		{
 			FVector2D Wing = AD.GetRotated(180.f + Sign * 30.f).GetSafeNormal();
-			MakeSeg(ArrowTip, ArrowTip + Wing * WingLen, ArrowColor, WingThick, FVector2D::ZeroVector);
+			SetSeg(49 + (Sign > 0.f ? 1 : 0), ArrowTip, ArrowTip + Wing * WingLen, ArrowColor, WingThick, FVector2D::ZeroVector);
 		}
 	}
+	AttackLineEnemyIndex = EnemyIndex;
+	AttackLineLastCardPosition = CardPos;
+	AttackLineLastEnemyPosition = EnemyPos;
+	AttackLineLastBuildTime = Now;
 
-	// Elastic spring animation
-	const float StartTime = GetWorld()->GetTimeSeconds();
-	AttackLineTimerHandle = MakeShared<FTimerHandle>();
-	GetWorld()->GetTimerManager().SetTimer(*AttackLineTimerHandle,
-		FTimerDelegate::CreateWeakLambda(this, [this, StartTime]()
-		{
-			const float Elapsed = GetWorld()->GetTimeSeconds() - StartTime;
-			const float T = FMath::Min(Elapsed / 0.3f, 1.f);
-			float Scale = 1.f + 0.15f * FMath::Sin(T * PI * 3.f) * (1.f - T);
-			Scale = FMath::Clamp(Scale, 0.1f, 1.3f);
-			for (UBorder* Seg : AttackLineSegments)
+	// 只有首次显示或切换目标时播放弹性，连续拖动不重复创建定时器。
+	if (bRestartSpring)
+	{
+		if (AttackLineTimerHandle.IsValid())
+			GetWorld()->GetTimerManager().ClearTimer(*AttackLineTimerHandle);
+		const float StartTime = GetWorld()->GetTimeSeconds();
+		AttackLineTimerHandle = MakeShared<FTimerHandle>();
+		GetWorld()->GetTimerManager().SetTimer(*AttackLineTimerHandle,
+			FTimerDelegate::CreateWeakLambda(this, [this, StartTime]()
 			{
-				if (Seg && Seg->IsValidLowLevel())
-					Seg->SetRenderScale(FVector2D(Scale, 1.f));
-			}
-			if (T >= 1.f)
-			{
+				const float Elapsed = GetWorld()->GetTimeSeconds() - StartTime;
+				const float T = FMath::Min(Elapsed / 0.3f, 1.f);
+				float Scale = 1.f + 0.15f * FMath::Sin(T * PI * 3.f) * (1.f - T);
+				Scale = FMath::Clamp(Scale, 0.1f, 1.3f);
 				for (UBorder* Seg : AttackLineSegments)
 				{
 					if (Seg && Seg->IsValidLowLevel())
-						Seg->SetRenderScale(FVector2D(1.f, 1.f));
+						Seg->SetRenderScale(FVector2D(Scale, 1.f));
 				}
-				if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(*AttackLineTimerHandle);
-			}
-		}), 0.033f, true);
+				if (T >= 1.f)
+				{
+					for (UBorder* Seg : AttackLineSegments)
+					{
+						if (Seg && Seg->IsValidLowLevel())
+							Seg->SetRenderScale(FVector2D(1.f, 1.f));
+					}
+					if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(*AttackLineTimerHandle);
+				}
+			}), 0.033f, true);
+	}
 }
 
 void AAscendPlayerController::HideAttackLine()
@@ -2322,9 +3185,13 @@ void AAscendPlayerController::HideAttackLine()
 		{
 			ActiveAnimations.Remove(Seg);
 			Seg->RemoveFromParent();
+			Seg->SetVisibility(ESlateVisibility::Collapsed);
 		}
 	}
-	AttackLineSegments.Empty();
+	AttackLineEnemyIndex = -1;
+	AttackLineLastCardPosition = FVector2D::ZeroVector;
+	AttackLineLastEnemyPosition = FVector2D::ZeroVector;
+	AttackLineLastBuildTime = 0.0;
 }
 
 // -----------------------------------------------------------
@@ -2351,31 +3218,60 @@ void AAscendPlayerController::ClearAnimations()
 		if (W && W->IsValidLowLevel()) W->RemoveFromParent();
 	}
 	ActiveAnimations.Empty();
+	ScreenShakeTrauma = 0.f;
+	ScreenShakePhase = 0.f;
 	if (ScreenHost) ScreenHost->SetRenderTransform(FWidgetTransform());
-	HideCardPreview();
+	// Focus cards live on AnimCanvas rather than in ActiveAnimations.  Remove
+	// the crisp layer synchronously when a screen is rebuilt, otherwise the old
+	// layer can survive one frame above the new combat panel.
+	if (AnimatedHoverCardVisual.IsValid())
+		AnimatedHoverCardVisual->RemoveFromParent();
+	if (AnimatedHoverCardButton.IsValid())
+	{
+		if (UWidget* OriginalVisual = AnimatedHoverCardButton->GetContent())
+		{
+			OriginalVisual->SetRenderTransformAngle(HoveredCardOriginalAngle);
+			OriginalVisual->SetRenderTranslation(FVector2D::ZeroVector);
+			OriginalVisual->SetRenderScale(FVector2D(1.f, 1.f));
+		}
+		AnimatedHoverCardButton->SetRenderOpacity(1.f);
+		if (UCanvasPanelSlot* Slot = Cast<UCanvasPanelSlot>(AnimatedHoverCardButton->Slot))
+			Slot->SetZOrder(AnimatedHoverCardIndex);
+	}
+	AnimatedHoverCardButton.Reset();
+	AnimatedHoverCardVisual.Reset();
+	AnimatedHoverCardIndex = INDEX_NONE;
+	HandHoverAnimationAlpha = 0.f;
+	bHandHoverTargetVisible = false;
+	HoveredCardOriginalAngle = 0.f;
 	UE_LOG(LogTemp, Display, TEXT("[DIAG] ClearAnimations done"));
 }
 
-void AAscendPlayerController::SpawnFloatingText(const FString& Text, FLinearColor Color, float X, float Y, float Duration)
+void AAscendPlayerController::SpawnFloatingText(const FString& Text, FLinearColor Color, float X, float Y,
+	float Duration, float BaseScale, float HorizontalDrift)
 {
 	if (!AnimCanvas || !GetWorld()) return;
 
 	UTextBlock* TB = FAscendUIStyle::MakeText(AnimCanvas, Text, 28, Color);
+	TB->SetShadowOffset(FVector2D(2.f, 2.f));
+	TB->SetShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.88f));
+	TB->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
 	UCanvasPanelSlot* Slot = AnimCanvas->AddChildToCanvas(TB);
 	Slot->SetPosition(FVector2D(X, Y));
 	Slot->SetAutoSize(true);
 	TB->SetRenderOpacity(1.f);
+	TB->SetRenderScale(FVector2D(BaseScale, BaseScale));
 	ActiveAnimations.Add(TB);
 
 	const float StartTime = GetWorld()->GetTimeSeconds();
 	TWeakObjectPtr<UTextBlock> WeakTB = TB;
-	FTimerHandle Handle;
-	GetWorld()->GetTimerManager().SetTimer(Handle,
-		FTimerDelegate::CreateWeakLambda(this, [this, WeakTB, Handle, StartTime, Duration]() mutable
+	TSharedPtr<FTimerHandle> TimerHandle = MakeShared<FTimerHandle>();
+	GetWorld()->GetTimerManager().SetTimer(*TimerHandle,
+		FTimerDelegate::CreateWeakLambda(this, [this, WeakTB, TimerHandle, StartTime, Duration, BaseScale, HorizontalDrift]()
 		{
 			if (!WeakTB.IsValid())
 			{
-				if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(Handle);
+				if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(*TimerHandle);
 				return;
 			}
 			const float Elapsed = GetWorld()->GetTimeSeconds() - StartTime;
@@ -2383,95 +3279,124 @@ void AAscendPlayerController::SpawnFloatingText(const FString& Text, FLinearColo
 			{
 				WeakTB->RemoveFromParent();
 				ActiveAnimations.Remove(WeakTB.Get());
-				if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(Handle);
+				if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(*TimerHandle);
 				return;
 			}
 			const float T = Elapsed / Duration;
-			WeakTB->SetRenderTranslation(FVector2D(0, -T * 50.f));
-			WeakTB->SetRenderOpacity(1.f - T);
+			const float Rise = 1.f - FMath::Pow(1.f - T, 3.f);
+			const float PopT = FMath::Clamp(T / 0.24f, 0.f, 1.f);
+			const float PopScale = BaseScale * (1.f + FMath::Sin(PopT * PI) * 0.24f);
+			const float Fade = 1.f - FMath::Clamp((T - 0.46f) / 0.54f, 0.f, 1.f);
+			WeakTB->SetRenderTranslation(FVector2D(HorizontalDrift * Rise, -Rise * 58.f));
+			WeakTB->SetRenderScale(FVector2D(PopScale, PopScale));
+			WeakTB->SetRenderOpacity(Fade);
 		}), 0.033f, true);
+	AnimTimerHandles.Add(*TimerHandle);
+}
+
+void AAscendPlayerController::QueueFloatingText(const FString& Text, FLinearColor Color,
+	const FVector2D& Position, float Delay, float Duration, float BaseScale, float HorizontalDrift)
+{
+	if (!AnimCanvas || !GetWorld()) return;
+	if (Delay <= KINDA_SMALL_NUMBER)
+	{
+		SpawnFloatingText(Text, Color, Position.X, Position.Y, Duration, BaseScale, HorizontalDrift);
+		return;
+	}
+
+	FTimerHandle Handle;
+	GetWorld()->GetTimerManager().SetTimer(Handle,
+		FTimerDelegate::CreateWeakLambda(this,
+			[this, Text, Color, Position, Duration, BaseScale, HorizontalDrift]()
+			{
+				SpawnFloatingText(Text, Color, Position.X, Position.Y, Duration, BaseScale, HorizontalDrift);
+			}), Delay, false);
 	AnimTimerHandles.Add(Handle);
 }
 
-void AAscendPlayerController::SpawnSlashEffect(float X, float Y, FLinearColor Color)
+void AAscendPlayerController::SpawnStrikeEffect(const FVector2D& Center, ECombatStrikeStyle Style,
+	FLinearColor Color, float Duration, float Rotation, float Strength, int32 Variant, float Delay)
 {
 	if (!AnimCanvas || !GetWorld()) return;
+	if (Delay > KINDA_SMALL_NUMBER)
+	{
+		FTimerHandle DelayedHandle;
+		GetWorld()->GetTimerManager().SetTimer(DelayedHandle,
+			FTimerDelegate::CreateWeakLambda(this,
+				[this, Center, Style, Color, Duration, Rotation, Strength, Variant]()
+				{
+					SpawnStrikeEffect(Center, Style, Color, Duration, Rotation, Strength, Variant, 0.f);
+				}), Delay, false);
+		AnimTimerHandles.Add(DelayedHandle);
+		return;
+	}
 
 	UCombatSlashWidget* Slash = CreateWidget<UCombatSlashWidget>(this, UCombatSlashWidget::StaticClass());
 	if (!Slash) return;
 	Slash->SetVisibility(ESlateVisibility::HitTestInvisible);
 	Slash->SlashColor = Color;
-	Slash->Rotation = FMath::FRandRange(-7.f, 7.f);
+	Slash->StrikeStyle = Style;
+	Slash->Rotation = Rotation;
+	Slash->Strength = Strength;
+	Slash->Variant = Variant;
 	Slash->SetSlashProgress(0.f);
+
+	FVector2D EffectSize(340.f, 270.f);
+	if (Style == ECombatStrikeStyle::Greatsword) EffectSize = FVector2D(470.f, 430.f);
+	else if (Style == ECombatStrikeStyle::MyriadSwords) EffectSize = FVector2D(500.f, 360.f);
+	else if (Style == ECombatStrikeStyle::SwordWave) EffectSize = FVector2D(560.f, 300.f);
+	else if (Style == ECombatStrikeStyle::Thunder) EffectSize = FVector2D(430.f, 440.f);
+	else if (Style == ECombatStrikeStyle::FlameBurst) EffectSize = FVector2D(380.f, 340.f);
+	else if (Style == ECombatStrikeStyle::Poison) EffectSize = FVector2D(340.f, 330.f);
+	else if (Style == ECombatStrikeStyle::Ward) EffectSize = FVector2D(360.f, 330.f);
+	else if (Style == ECombatStrikeStyle::SpiritFlow) EffectSize = FVector2D(330.f, 360.f);
+	else if (Style == ECombatStrikeStyle::PowerAura) EffectSize = FVector2D(360.f, 350.f);
+	else if (Style == ECombatStrikeStyle::Talisman || Style == ECombatStrikeStyle::Seal)
+		EffectSize = FVector2D(340.f, 340.f);
+	else if (Style == ECombatStrikeStyle::CurseBurst) EffectSize = FVector2D(350.f, 330.f);
+	else if (Style == ECombatStrikeStyle::ImpactBurst) EffectSize = FVector2D(220.f, 190.f);
+
 	UCanvasPanelSlot* Slot = AnimCanvas->AddChildToCanvas(Slash);
-	Slot->SetPosition(FVector2D(X - 130.f, Y - 106.f));
-	Slot->SetSize(FVector2D(260.f, 212.f));
-	Slot->SetZOrder(1100);
+	Slot->SetPosition(Center - EffectSize * 0.5f);
+	Slot->SetSize(EffectSize);
+	Slot->SetZOrder(1100 + FMath::Clamp(Variant, 0, 24));
 	ActiveAnimations.Add(Slash);
 
 	const float StartTime = GetWorld()->GetTimeSeconds();
-	const float Duration = 0.42f;
+	const float SafeDuration = FMath::Max(0.18f, Duration);
 	TWeakObjectPtr<UCombatSlashWidget> WeakSlash = Slash;
 	TSharedPtr<FTimerHandle> TimerHandle = MakeShared<FTimerHandle>();
 	GetWorld()->GetTimerManager().SetTimer(*TimerHandle,
-		FTimerDelegate::CreateWeakLambda(this, [this, WeakSlash, TimerHandle, StartTime, Duration]()
+		FTimerDelegate::CreateWeakLambda(this, [this, WeakSlash, TimerHandle, StartTime, SafeDuration, Style]()
 		{
 			if (!WeakSlash.IsValid())
 			{
 				if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(*TimerHandle);
 				return;
 			}
-			const float T = FMath::Clamp((GetWorld()->GetTimeSeconds() - StartTime) / Duration, 0.f, 1.f);
-			const float Ease = FMath::InterpEaseOut(0.f, 1.f, T, 2.2f);
-			WeakSlash->SetSlashProgress(Ease);
-			WeakSlash->SetRenderOpacity(1.f - T * T);
+			const float T = FMath::Clamp((GetWorld()->GetTimeSeconds() - StartTime) / SafeDuration, 0.f, 1.f);
+			WeakSlash->SetSlashProgress(T);
+			const float FadeStart = Style == ECombatStrikeStyle::Greatsword ? 0.72f
+				: (Style == ECombatStrikeStyle::MyriadSwords ? 0.80f
+					: (Style == ECombatStrikeStyle::Ward || Style == ECombatStrikeStyle::PowerAura
+						|| Style == ECombatStrikeStyle::Talisman || Style == ECombatStrikeStyle::Seal
+						|| Style == ECombatStrikeStyle::SpiritFlow ? 0.70f : 0.62f));
+			const float Fade = 1.f - FMath::Clamp((T - FadeStart) / FMath::Max(0.01f, 1.f - FadeStart), 0.f, 1.f);
+			WeakSlash->SetRenderOpacity(Fade);
 			if (T >= 1.f)
 			{
 				WeakSlash->RemoveFromParent();
 				ActiveAnimations.Remove(WeakSlash.Get());
 				if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(*TimerHandle);
 			}
-		}), 0.033f, true);
+		}), 0.016f, true);
 	AnimTimerHandles.Add(*TimerHandle);
 }
 
 void AAscendPlayerController::SpawnImpactBurst(const FVector2D& Center, FLinearColor Color, float Duration)
 {
-	if (!AnimCanvas || !GetWorld()) return;
-
-	UTextBlock* Burst = FAscendUIStyle::MakeText(AnimCanvas, TEXT("✹"), 66, Color);
-	Burst->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
-	UCanvasPanelSlot* Slot = AnimCanvas->AddChildToCanvas(Burst);
-	Slot->SetPosition(Center - FVector2D(33.f, 33.f));
-	Slot->SetAutoSize(true);
-	Burst->SetRenderScale(FVector2D(0.15f, 0.15f));
-	Burst->SetRenderOpacity(0.95f);
-	ActiveAnimations.Add(Burst);
-
-	const float StartTime = GetWorld()->GetTimeSeconds();
-	const float SafeDuration = FMath::Max(0.12f, Duration);
-	TWeakObjectPtr<UTextBlock> WeakBurst = Burst;
-	TSharedPtr<FTimerHandle> TimerHandle = MakeShared<FTimerHandle>();
-	GetWorld()->GetTimerManager().SetTimer(*TimerHandle,
-		FTimerDelegate::CreateWeakLambda(this, [this, WeakBurst, TimerHandle, StartTime, SafeDuration]()
-		{
-			if (!WeakBurst.IsValid())
-			{
-				if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(*TimerHandle);
-				return;
-			}
-			const float T = FMath::Clamp((GetWorld()->GetTimeSeconds() - StartTime) / SafeDuration, 0.f, 1.f);
-			const float Scale = FMath::InterpEaseOut(0.15f, 1.55f, T, 2.f) * (1.f - 0.35f * T);
-			WeakBurst->SetRenderScale(FVector2D(Scale, Scale));
-			WeakBurst->SetRenderOpacity(0.95f * (1.f - T));
-			if (T >= 1.f)
-			{
-				WeakBurst->RemoveFromParent();
-				ActiveAnimations.Remove(WeakBurst.Get());
-				if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(*TimerHandle);
-			}
-		}), 0.033f, true);
-	AnimTimerHandles.Add(*TimerHandle);
+	SpawnStrikeEffect(Center, ECombatStrikeStyle::ImpactBurst, Color,
+		FMath::Max(0.14f, Duration), 0.f, 1.f, FMath::Abs(FMath::RoundToInt(Center.X + Center.Y)) % 17);
 }
 
 void AAscendPlayerController::SpawnProjectileEffect(const FVector2D& From, const FVector2D& To,
@@ -2572,15 +3497,39 @@ void AAscendPlayerController::SpawnHealBurst(const FVector2D& Center, FLinearCol
 void AAscendPlayerController::PlayVisualSound(const FString& SoundId)
 {
 	if (!GetWorld() || SoundId.IsEmpty() || SoundId == TEXT("none")) return;
+	// 音频路由器现在会规范化旧卡牌别名，并用共享的 impact_hit 兜底。
+	// 只要路由器存在，就不再进入运行时程序化合成，避免旧 8-bit 音色和实时采样开销。
+	if (AudioRouter)
+	{
+		AudioRouter->PlaySfx(SoundId);
+		return;
+	}
+	// 音频路由器正常在 BeginPlay 创建；没有路由器时也静默跳过，
+	// 不再生成任何临时程序化音频，避免质量和实时负载问题。
+	return;
+#if 0
 	if (InfiniteNarrativeSettings.SfxVolume <= 0.001f) return;
 
 	const int32 SampleRate = 44100;
 	const bool bSword = SoundId.Contains(TEXT("sword"));
+	const bool bHeavySword = SoundId.Contains(TEXT("heavy"));
+	const bool bSwordFlurry = SoundId.Contains(TEXT("flurry"));
+	const bool bSwordWave = SoundId.Contains(TEXT("wave"));
 	const bool bFire = SoundId.Contains(TEXT("fire"));
-	const bool bBlock = SoundId.Contains(TEXT("block"));
+	const bool bThunder = SoundId.Contains(TEXT("thunder"));
+	const bool bPoison = SoundId.Contains(TEXT("poison"));
+	const bool bBlock = SoundId.Contains(TEXT("block")) || SoundId.Contains(TEXT("ward"));
 	const bool bHeal = SoundId.Contains(TEXT("heal"));
 	const bool bDraw = SoundId.Contains(TEXT("draw"));
-	const float Duration = bFire ? 0.46f : (bSword ? 0.32f : (bHeal || bDraw ? 0.38f : 0.28f));
+	const bool bSpirit = SoundId.Contains(TEXT("spirit"));
+	const bool bPower = SoundId.Contains(TEXT("power"));
+	const bool bTalisman = SoundId.Contains(TEXT("talisman"));
+	const bool bSeal = SoundId.Contains(TEXT("seal"));
+	const bool bCurse = SoundId.Contains(TEXT("curse"));
+	const float Duration = bHeavySword ? 0.62f : (bSwordFlurry ? 0.74f : (bSwordWave ? 0.50f
+		: (bThunder ? 0.58f : (bFire ? 0.46f : (bPoison ? 0.48f
+			: (bSword ? 0.32f : (bHeal || bDraw || bSpirit || bPower || bTalisman || bSeal
+				? 0.42f : (bCurse ? 0.52f : 0.28f))))))));
 	const int32 SampleCount = FMath::RoundToInt(Duration * SampleRate);
 	TArray<int16> Samples;
 	Samples.SetNumUninitialized(SampleCount);
@@ -2596,7 +3545,50 @@ void AAscendPlayerController::PlayVisualSound(const FString& SoundId)
 		const float HighNoise = N - PreviousNoise;
 		PreviousNoise = N;
 		float Signal = 0.f;
-		if (bSword)
+		if (bHeavySword)
+		{
+			// 巨剑：前半是下沉的蓄力风压，0.22s 落地时叠加低频冲击与金属余震。
+			const float Windup = FMath::Clamp(T / 0.22f, 0.f, 1.f);
+			const float WindFreq = FMath::Lerp(180.f, 62.f, Windup);
+			const float Wind = (0.26f + 0.42f * Windup) * SmoothedNoise
+				+ 0.28f * FMath::Sin(2.f * PI * WindFreq * T);
+			const float ImpactT = FMath::Max(0.f, T - 0.22f);
+			const float ImpactGate = T >= 0.22f ? 1.f : 0.f;
+			const float Slam = ImpactGate * FMath::Exp(-15.f * ImpactT)
+				* (0.82f * FMath::Sin(2.f * PI * 64.f * ImpactT)
+					+ 0.30f * FMath::Sin(2.f * PI * 128.f * ImpactT));
+			const float Steel = ImpactGate * FMath::Exp(-7.f * ImpactT)
+				* (0.23f * FMath::Sin(2.f * PI * 690.f * ImpactT)
+					+ 0.14f * FMath::Sin(2.f * PI * 1040.f * ImpactT));
+			Signal = Wind * (T < 0.22f ? 0.72f : FMath::Exp(-9.f * ImpactT)) + Slam + Steel
+				+ HighNoise * 0.24f * ImpactGate * FMath::Exp(-25.f * ImpactT);
+		}
+		else if (bSwordFlurry)
+		{
+			// 万剑：六个独立短促刃风包络，每次命中都有可分辨的高频起音。
+			Signal = SmoothedNoise * 0.08f * FMath::Exp(-2.4f * T);
+			for (int32 Strike = 0; Strike < 6; ++Strike)
+			{
+				const float LocalT = T - 0.072f * Strike;
+				if (LocalT < 0.f) continue;
+				const float Env = FMath::Exp(-34.f * LocalT);
+				const float Root = 1520.f + Strike * 125.f;
+				Signal += Env * (0.34f * FMath::Sin(2.f * PI * Root * LocalT)
+					+ 0.16f * FMath::Sin(2.f * PI * Root * 0.47f * LocalT))
+					+ HighNoise * 0.12f * Env;
+			}
+			const float FinalT = FMath::Max(0.f, T - 0.43f);
+			if (T >= 0.43f)
+				Signal += FMath::Sin(2.f * PI * 118.f * FinalT) * FMath::Exp(-22.f * FinalT) * 0.38f;
+		}
+		else if (bSwordWave)
+		{
+			const float Sweep = FMath::Lerp(1250.f, 96.f, FMath::Pow(NormalizedT, 0.64f));
+			Signal = FMath::Exp(-4.2f * T) * (0.50f * FMath::Sin(2.f * PI * Sweep * T)
+				+ 0.20f * FMath::Sin(2.f * PI * Sweep * 0.52f * T))
+				+ SmoothedNoise * 0.28f * FMath::Exp(-5.4f * T);
+		}
+		else if (bSword)
 		{
 			// 剑风：两层反向音高滑落 + 高频刃口噪声 + 很短的低频触击。
 			const float Sweep = FMath::Lerp(2300.f, 190.f, FMath::Pow(NormalizedT, 0.72f));
@@ -2607,6 +3599,15 @@ void AAscendPlayerController::PlayVisualSound(const FString& SoundId)
 			const float ImpactT = FMath::Max(0.f, T - 0.055f);
 			const float Impact = FMath::Sin(2.f * PI * 132.f * ImpactT) * FMath::Exp(-34.f * ImpactT) * 0.32f;
 			Signal = Whoosh + Edge + Impact;
+		}
+		else if (bThunder)
+		{
+			// Lightning: an immediate broadband crack followed by a low rolling tail.
+			const float Crack = FMath::Exp(-42.f * T);
+			const float Roll = FMath::Exp(-5.2f * T);
+			Signal = HighNoise * 0.84f * Crack
+				+ SmoothedNoise * 0.30f * Roll
+				+ FMath::Sin(2.f * PI * FMath::Lerp(168.f, 48.f, NormalizedT) * T) * 0.42f * Roll;
 		}
 		else if (bFire)
 		{
@@ -2619,6 +3620,14 @@ void AAscendPlayerController::PlayVisualSound(const FString& SoundId)
 			const float Sparks = HighNoise * (0.10f + 0.16f * (1.f - NormalizedT)) * FMath::Exp(-3.8f * T);
 			Signal = Crackle + Rumble * FlameEnv + Sparks;
 		}
+		else if (bPoison)
+		{
+			// Poison: wet filtered hiss and descending hollow bubbles.
+			const float Hiss = SmoothedNoise * 0.36f * FMath::Exp(-3.4f * T);
+			const float Bubble = FMath::Sin(2.f * PI * FMath::Lerp(510.f, 96.f, NormalizedT) * T)
+				* FMath::Exp(-5.5f * T);
+			Signal = Hiss + Bubble * 0.32f + FMath::Sin(2.f * PI * 73.f * T) * 0.12f;
+		}
 		else if (bBlock)
 		{
 			// 护体/格挡：短促金属共振，不再是单一 420Hz 正弦波。
@@ -2628,15 +3637,24 @@ void AAscendPlayerController::PlayVisualSound(const FString& SoundId)
 				+ 0.12f * FMath::Sin(2.f * PI * 1410.f * T))
 				+ HighNoise * 0.14f * FMath::Exp(-30.f * T);
 		}
-		else if (bHeal || bDraw)
+		else if (bCurse)
 		{
-			// 回春/抽牌：两到三层短铃声，给界面反馈一个更柔和的音高轮廓。
+			const float Fall = FMath::Lerp(310.f, 42.f, NormalizedT);
+			Signal = FMath::Sin(2.f * PI * Fall * T) * FMath::Exp(-4.2f * T) * 0.44f
+				+ SmoothedNoise * 0.26f * (0.25f + NormalizedT) * FMath::Exp(-2.8f * T);
+		}
+		else if (bHeal || bDraw || bSpirit || bPower || bTalisman || bSeal)
+		{
+			// Support families use different pentatonic roots and overtones, keeping
+			// utility cards gentle but audibly distinct from one another.
 			const float Attack = FMath::Clamp(T / 0.018f, 0.f, 1.f);
 			const float Release = FMath::Exp(-6.8f * T);
-			const float Root = bHeal ? 640.f : 560.f;
+			const float Root = bHeal ? 640.f : (bSpirit ? 720.f : (bPower ? 410.f
+				: (bTalisman ? 820.f : (bSeal ? 505.f : 560.f))));
 			Signal = Attack * Release * (0.42f * FMath::Sin(2.f * PI * Root * T)
 				+ 0.24f * FMath::Sin(2.f * PI * Root * 1.5f * T)
 				+ 0.14f * FMath::Sin(2.f * PI * Root * 2.01f * T));
+			if (bPower) Signal += FMath::Sin(2.f * PI * 96.f * T) * FMath::Exp(-5.f * T) * 0.30f;
 		}
 		else
 		{
@@ -2653,86 +3671,365 @@ void AAscendPlayerController::PlayVisualSound(const FString& SoundId)
 	Wave->bLooping = false;
 	Wave->QueueAudio(reinterpret_cast<const uint8*>(Samples.GetData()), Samples.Num() * sizeof(int16));
 	ActiveSoundWaves.Add(Wave);
+	const float FamilyVolume = bHeavySword ? 0.80f : (bSwordFlurry ? 0.70f : (bSwordWave ? 0.68f
+		: (bThunder ? 0.76f : (bFire ? 0.72f : (bCurse ? 0.60f : (bSword ? 0.62f : 0.58f))))));
 	UGameplayStatics::PlaySound2D(this, Wave,
-		(bFire ? 0.72f : (bSword ? 0.62f : 0.58f)) * FMath::Clamp(InfiniteNarrativeSettings.SfxVolume, 0.f, 1.f), 1.f);
+		FamilyVolume * FMath::Clamp(InfiniteNarrativeSettings.SfxVolume, 0.f, 1.f), 1.f);
+#endif
+}
+
+void AAscendPlayerController::PlayAudioEvent(const FString& EventId, float VolumeScale,
+	float PitchMin, float PitchMax)
+{
+	if (EventId.IsEmpty() || EventId == TEXT("none")) return;
+	if (AudioRouter && AudioRouter->PlaySfx(EventId, VolumeScale, PitchMin, PitchMax)) return;
+	// 仅在极端情况下（路由器尚未创建）保留兼容入口；正常运行完全使用导入的现代音频资产。
+	PlayVisualSound(EventId);
+}
+
+TArray<TPair<int32, int32>> AAscendPlayerController::CollectPendingEnemyDamageEvents() const
+{
+	TArray<TPair<int32, int32>> Events;
+	if (!Combat) return Events;
+	// Combat indices are authoritative. Localized combat log text cannot identify
+	// which copy was hit when several enemies share the same display name.
+	const int32 EventCount = Combat->EnemyDamageEvents.Num();
+	const int32 StartIndex = LastProcessedEnemyDamageEventIndex <= EventCount
+		? FMath::Max(0, LastProcessedEnemyDamageEventIndex) : 0;
+	for (int32 EventIndex = StartIndex; EventIndex < EventCount; ++EventIndex)
+	{
+		const FEnemyDamageEvent& Event = Combat->EnemyDamageEvents[EventIndex];
+		if (Combat->Enemies.IsValidIndex(Event.EnemyIndex))
+			Events.Emplace(Event.EnemyIndex, Event.Damage);
+	}
+	return Events;
 }
 
 void AAscendPlayerController::PlayCardVisual(const FCardInstance& Card, int32 TargetEnemyIndex)
 {
 	if (!Combat) return;
 	const FCardVisualData& Visual = Card.Data.Visual;
-	LastPlayedVisualAnimation = Visual.Animation == TEXT("none") ? TEXT("") : Visual.Animation;
-	if (Visual.Sound != TEXT("none")) PlayVisualSound(Visual.Sound);
+	const FString Animation = AscendCardVisual::ResolveAnimation(Card);
+	const FString Sound = AscendCardVisual::ResolveSound(Card, Animation);
+	LastPlayedVisualAnimation = Animation == TEXT("none") ? TEXT("") : Animation;
+	if (Sound != TEXT("none"))
+	{
+		PlayAudioEvent(TEXT("card_play"), 0.38f, 0.98f, 1.02f);
+		PlayAudioEvent(Sound, 1.f);
+	}
 	if (LastPlayedVisualAnimation.IsEmpty()) return;
 
-	const FLinearColor Accent = FColor::FromHex(Visual.Accent.IsEmpty() ? TEXT("#FFFFFF") : Visual.Accent);
-	const FVector2D EnemyPos = GetEnemyScreenPos(TargetEnemyIndex);
-	const FVector2D PlayerPos = FVector2D(GetViewportSize().X * 0.5f, GetViewportSize().Y * 0.64f);
-	const float Duration = FMath::Max(0.12f, Visual.Duration);
+	const FString AccentHex = AscendCardVisual::ResolveAccent(Card, Animation);
+	const FLinearColor Accent = FColor::FromHex(AccentHex);
+	FVector2D CanvasSize = GetViewportSize();
+	if (AnimCanvas)
+	{
+		const FVector2D Measured = AnimCanvas->GetTickSpaceGeometry().GetLocalSize();
+		if (Measured.X > 1.f && Measured.Y > 1.f) CanvasSize = Measured;
+	}
+	const FVector2D PlayerPos = FVector2D(CanvasSize.X * 0.5f, CanvasSize.Y * 0.64f);
+	float Duration = FMath::Max(0.12f, Visual.Duration);
+	if (Animation == TEXT("greatsword")) Duration = FMath::Max(Duration, 0.82f);
+	else if (Animation == TEXT("myriad_swords")) Duration = FMath::Max(Duration, 0.88f);
+	else if (Animation == TEXT("sword_wave")) Duration = FMath::Max(Duration, 0.58f);
+	else if (Animation == TEXT("thunder")) Duration = FMath::Max(Duration, 0.62f);
+	else if (Animation == TEXT("flame_burst") || Animation == TEXT("poison")) Duration = FMath::Max(Duration, 0.58f);
+	else if (Animation == TEXT("ward") || Animation == TEXT("spirit_flow")
+		|| Animation == TEXT("power_aura") || Animation == TEXT("talisman")
+		|| Animation == TEXT("seal") || Animation == TEXT("curse_burst"))
+		Duration = FMath::Max(Duration, 0.56f);
 
-	if (Visual.Animation == TEXT("slash"))
+	const TArray<TPair<int32, int32>> DamageEvents = CollectPendingEnemyDamageEvents();
+	TMap<int32, int32> DamageTotals;
+	TArray<int32> Targets;
+	for (const TPair<int32, int32>& Event : DamageEvents)
 	{
-		const int32 SlashCount = FMath::Max(1, Visual.Count);
-		for (int32 Index = 0; Index < SlashCount; ++Index)
-			SpawnSlashEffect(EnemyPos.X + (Index - (SlashCount - 1) * 0.5f) * 20.f, EnemyPos.Y - Index * 8.f, Accent);
-		SpawnImpactBurst(EnemyPos, Accent, Duration * 0.75f);
+		DamageTotals.FindOrAdd(Event.Key) += Event.Value;
+		Targets.AddUnique(Event.Key);
 	}
-	else if (Visual.Animation == TEXT("fireball"))
+	if (Targets.Num() == 0 && AscendCardVisual::DealsDamage(Card))
 	{
+		if (AscendCardVisual::TargetsAllEnemies(Card))
+		{
+			for (int32 Index = 0; Index < Combat->Enemies.Num(); ++Index)
+				if (Combat->Enemies[Index].State.IsAlive()) Targets.Add(Index);
+		}
+		else if (Combat->Enemies.IsValidIndex(TargetEnemyIndex))
+		{
+			Targets.Add(TargetEnemyIndex);
+		}
+	}
+	if (Targets.Num() == 0 && AscendCardVisual::TargetsEnemy(Card)
+		&& Combat->Enemies.IsValidIndex(TargetEnemyIndex))
+	{
+		Targets.Add(TargetEnemyIndex);
+	}
+
+	auto QueueImpact = [this](const FVector2D& Center, FLinearColor Color, float Delay, float ImpactDuration)
+	{
+		if (!GetWorld()) return;
+		if (Delay <= KINDA_SMALL_NUMBER)
+		{
+			SpawnImpactBurst(Center, Color, ImpactDuration);
+			return;
+		}
+		FTimerHandle Handle;
+		GetWorld()->GetTimerManager().SetTimer(Handle,
+			FTimerDelegate::CreateWeakLambda(this, [this, Center, Color, ImpactDuration]()
+			{
+				SpawnImpactBurst(Center, Color, ImpactDuration);
+			}), Delay, false);
+		AnimTimerHandles.Add(Handle);
+	};
+
+	auto QueueShake = [this](float Intensity, float ShakeDuration, float Delay)
+	{
+		if (!GetWorld()) return;
+		if (Delay <= KINDA_SMALL_NUMBER)
+		{
+			AnimateScreenShake(Intensity, ShakeDuration);
+			return;
+		}
+		FTimerHandle Handle;
+		GetWorld()->GetTimerManager().SetTimer(Handle,
+			FTimerDelegate::CreateWeakLambda(this, [this, Intensity, ShakeDuration]()
+			{
+				AnimateScreenShake(Intensity, ShakeDuration);
+			}), Delay, false);
+		AnimTimerHandles.Add(Handle);
+	};
+
+	if (Animation == TEXT("greatsword"))
+	{
+		for (int32 TargetOrder = 0; TargetOrder < Targets.Num(); ++TargetOrder)
+		{
+			const int32 EnemyIndex = Targets[TargetOrder];
+			const FVector2D Pos = GetEnemyScreenPos(EnemyIndex);
+			const float Delay = TargetOrder * 0.035f;
+			SpawnStrikeEffect(Pos, ECombatStrikeStyle::Greatsword, Accent, Duration,
+				TargetOrder % 2 == 0 ? -5.f : 5.f, 1.28f, TargetOrder, Delay);
+			QueueImpact(Pos + FVector2D(0.f, 30.f), FLinearColor(1.f, 0.82f, 0.32f), Delay + Duration * 0.46f, 0.30f);
+			if (const int32* Damage = DamageTotals.Find(EnemyIndex))
+			{
+				QueueFloatingText(FString::Printf(TEXT("-%d"), *Damage),
+					FLinearColor(1.f, 0.28f, 0.08f), Pos + FVector2D(-28.f, -42.f),
+					Delay + Duration * 0.47f, 1.16f, 1.62f, TargetOrder % 2 == 0 ? -14.f : 14.f);
+			}
+		}
+		QueueShake(FMath::Max(11.f, Visual.Intensity), 0.34f, Duration * 0.45f);
+		if (GetWorld())
+		{
+			FTimerHandle FlashHandle;
+			GetWorld()->GetTimerManager().SetTimer(FlashHandle,
+				FTimerDelegate::CreateWeakLambda(this, [this, Accent]()
+				{
+					AnimateColorFlash(Accent, 0.12f);
+				}), Duration * 0.45f, false);
+			AnimTimerHandles.Add(FlashHandle);
+		}
+	}
+	else if (Animation == TEXT("myriad_swords"))
+	{
+		for (int32 TargetOrder = 0; TargetOrder < Targets.Num(); ++TargetOrder)
+		{
+			const int32 EnemyIndex = Targets[TargetOrder];
+			const FVector2D Pos = GetEnemyScreenPos(EnemyIndex);
+			const float TargetDelay = TargetOrder * 0.045f;
+			SpawnStrikeEffect(Pos, ECombatStrikeStyle::MyriadSwords, Accent, Duration,
+				0.f, 1.05f, TargetOrder + Card.RepeatCount, TargetDelay);
+			const int32 TotalDamage = DamageTotals.FindRef(EnemyIndex);
+			const int32 HitCount = FMath::Clamp(FMath::Min(TotalDamage,
+				5 + FMath::Min(3, Card.RepeatCount)), TotalDamage > 0 ? 1 : 0, 8);
+			if (HitCount > 0)
+			{
+				const int32 BaseHit = TotalDamage / HitCount;
+				const int32 Remainder = TotalDamage % HitCount;
+				for (int32 Hit = 0; Hit < HitCount; ++Hit)
+				{
+					const int32 HitDamage = BaseHit + (Hit < Remainder ? 1 : 0);
+					const float HitDelay = TargetDelay + 0.13f + Hit * 0.078f;
+					const float XOffset = (Hit - (HitCount - 1) * 0.5f) * 17.f;
+					const FLinearColor NumberColor = Hit % 2 == 0
+						? FLinearColor(1.f, 0.38f, 0.12f) : FLinearColor(1.f, 0.78f, 0.26f);
+					QueueFloatingText(FString::Printf(TEXT("-%d"), HitDamage), NumberColor,
+						Pos + FVector2D(XOffset - 15.f, -24.f - (Hit % 2) * 15.f),
+						HitDelay, 0.78f, 0.88f + Hit * 0.035f, (Hit % 2 == 0 ? -1.f : 1.f) * (8.f + Hit));
+					QueueImpact(Pos + FVector2D(XOffset * 0.4f, (Hit % 3 - 1) * 13.f), Accent,
+						HitDelay - 0.025f, 0.14f);
+				}
+			}
+		}
+		QueueShake(3.2f, 0.13f, 0.17f);
+		QueueShake(3.8f, 0.14f, 0.38f);
+		QueueShake(FMath::Max(6.2f, Visual.Intensity), 0.20f, 0.56f);
+	}
+	else if (Animation == TEXT("sword_wave"))
+	{
+		FVector2D WaveCenter = Targets.Num() > 0 ? FVector2D::ZeroVector : GetEnemyScreenPos(TargetEnemyIndex);
+		for (int32 EnemyIndex : Targets) WaveCenter += GetEnemyScreenPos(EnemyIndex);
+		if (Targets.Num() > 0) WaveCenter /= Targets.Num();
+		SpawnStrikeEffect(WaveCenter, ECombatStrikeStyle::SwordWave, Accent, Duration,
+			-4.f, 1.08f, Card.UID % 7);
+		for (int32 TargetOrder = 0; TargetOrder < Targets.Num(); ++TargetOrder)
+		{
+			const int32 EnemyIndex = Targets[TargetOrder];
+			const FVector2D Pos = GetEnemyScreenPos(EnemyIndex);
+			if (const int32* Damage = DamageTotals.Find(EnemyIndex))
+				QueueFloatingText(FString::Printf(TEXT("-%d"), *Damage), FLinearColor(1.f, 0.32f, 0.10f),
+					Pos + FVector2D(-20.f, -28.f), 0.24f + TargetOrder * 0.035f, 0.95f, 1.18f,
+					TargetOrder % 2 == 0 ? -10.f : 10.f);
+			QueueImpact(Pos, Accent, 0.22f + TargetOrder * 0.035f, 0.20f);
+		}
+		QueueShake(FMath::Max(6.5f, Visual.Intensity), 0.22f, 0.23f);
+	}
+	else if (Animation == TEXT("slash"))
+	{
+		const int32 SlashCount = FMath::Clamp(Visual.Count, 1, 4);
+		for (int32 TargetOrder = 0; TargetOrder < Targets.Num(); ++TargetOrder)
+		{
+			const int32 EnemyIndex = Targets[TargetOrder];
+			const FVector2D Pos = GetEnemyScreenPos(EnemyIndex);
+			for (int32 SlashIndex = 0; SlashIndex < SlashCount; ++SlashIndex)
+			{
+				const float Delay = TargetOrder * 0.035f + SlashIndex * 0.075f;
+				const float Rotation = -12.f + SlashIndex * 17.f;
+				SpawnStrikeEffect(Pos + FVector2D((SlashIndex - (SlashCount - 1) * 0.5f) * 12.f, 0.f),
+					ECombatStrikeStyle::ArcSlash, Accent, FMath::Max(0.32f, Duration), Rotation,
+					1.f + 0.05f * SlashIndex, SlashIndex + TargetOrder * 4, Delay);
+			}
+			if (const int32* Damage = DamageTotals.Find(EnemyIndex))
+				QueueFloatingText(FString::Printf(TEXT("-%d"), *Damage), FLinearColor(1.f, 0.30f, 0.10f),
+					Pos + FVector2D(-20.f, -25.f), 0.13f + (SlashCount - 1) * 0.055f,
+					0.95f, SlashCount > 1 ? 1.18f : 1.f, TargetOrder % 2 == 0 ? -9.f : 9.f);
+			QueueImpact(Pos, Accent, 0.12f + (SlashCount - 1) * 0.055f, 0.19f);
+		}
+		QueueShake(FMath::Max(2.8f, Visual.Intensity), 0.16f, 0.12f);
+	}
+	else if (Animation == TEXT("fireball"))
+	{
+		const FVector2D EnemyPos = GetEnemyScreenPos(TargetEnemyIndex);
 		SpawnProjectileEffect(PlayerPos, EnemyPos, Accent, Duration);
+		for (int32 EnemyIndex : Targets)
+		{
+			if (const int32* Damage = DamageTotals.Find(EnemyIndex))
+				QueueFloatingText(FString::Printf(TEXT("-%d"), *Damage), FLinearColor(1.f, 0.28f, 0.06f),
+					GetEnemyScreenPos(EnemyIndex) + FVector2D(-20.f, -28.f), Duration * 0.90f,
+					0.95f, 1.16f, 8.f);
+		}
+		QueueShake(FMath::Max(4.f, Visual.Intensity), 0.20f, Duration * 0.88f);
 	}
-	else if (Visual.Animation == TEXT("impact"))
+	else if (Animation == TEXT("impact"))
 	{
-		SpawnImpactBurst(EnemyPos, Accent, Duration);
+		for (int32 EnemyIndex : Targets)
+		{
+			const FVector2D Pos = GetEnemyScreenPos(EnemyIndex);
+			SpawnImpactBurst(Pos, Accent, Duration);
+			if (const int32* Damage = DamageTotals.Find(EnemyIndex))
+				QueueFloatingText(FString::Printf(TEXT("-%d"), *Damage), FLinearColor(1.f, 0.30f, 0.10f),
+					Pos + FVector2D(-20.f, -28.f), 0.08f, 0.90f, 1.05f, 6.f);
+		}
+		QueueShake(FMath::Max(2.8f, Visual.Intensity), 0.15f, 0.05f);
 	}
-	else if (Visual.Animation == TEXT("block"))
+	else if (Animation == TEXT("thunder") || Animation == TEXT("flame_burst")
+		|| Animation == TEXT("poison"))
+	{
+		const ECombatStrikeStyle Style = Animation == TEXT("thunder") ? ECombatStrikeStyle::Thunder
+			: (Animation == TEXT("flame_burst") ? ECombatStrikeStyle::FlameBurst : ECombatStrikeStyle::Poison);
+		const float ImpactDelay = Animation == TEXT("thunder") ? 0.19f
+			: (Animation == TEXT("flame_burst") ? 0.22f : 0.18f);
+		for (int32 TargetOrder = 0; TargetOrder < Targets.Num(); ++TargetOrder)
+		{
+			const int32 EnemyIndex = Targets[TargetOrder];
+			const FVector2D Pos = GetEnemyScreenPos(EnemyIndex);
+			const float Delay = TargetOrder * 0.045f;
+			SpawnStrikeEffect(Pos, Style, Accent, Duration, 0.f,
+				Animation == TEXT("thunder") ? 1.18f : 1.04f, Card.UID + TargetOrder, Delay);
+			if (const int32* Damage = DamageTotals.Find(EnemyIndex))
+			{
+				const FLinearColor NumberColor = Animation == TEXT("poison")
+					? FLinearColor(0.72f, 1.f, 0.28f) : FLinearColor(1.f, 0.32f, 0.08f);
+				QueueFloatingText(FString::Printf(TEXT("-%d"), *Damage), NumberColor,
+					Pos + FVector2D(-20.f, -30.f), Delay + ImpactDelay, 0.98f,
+					Animation == TEXT("thunder") ? 1.32f : 1.14f, TargetOrder % 2 == 0 ? -9.f : 9.f);
+			}
+			QueueImpact(Pos, Accent, Delay + ImpactDelay, 0.20f);
+		}
+		QueueShake(Animation == TEXT("thunder") ? FMath::Max(7.8f, Visual.Intensity)
+			: FMath::Max(4.2f, Visual.Intensity), Animation == TEXT("thunder") ? 0.24f : 0.18f,
+			ImpactDelay);
+	}
+	else if (Animation == TEXT("ward"))
+	{
+		SpawnStrikeEffect(PlayerPos, ECombatStrikeStyle::Ward, Accent, Duration,
+			0.f, 1.06f, Card.UID);
+		QueueFloatingText(TEXT("护体"), Accent, PlayerPos + FVector2D(-36.f, -72.f),
+			0.16f, 0.92f, 1.08f, 0.f);
+		AnimateColorFlash(Accent, 0.10f);
+	}
+	else if (Animation == TEXT("spirit_flow"))
+	{
+		SpawnStrikeEffect(PlayerPos, ECombatStrikeStyle::SpiritFlow, Accent, Duration,
+			0.f, 1.f, Card.UID);
+		QueueFloatingText(TEXT("灵气流转"), Accent, PlayerPos + FVector2D(-62.f, -82.f),
+			0.18f, 1.0f, 1.0f, 4.f);
+	}
+	else if (Animation == TEXT("power_aura"))
+	{
+		SpawnStrikeEffect(PlayerPos, ECombatStrikeStyle::PowerAura, Accent, Duration,
+			0.f, 1.08f, Card.UID);
+		QueueFloatingText(Card.Data.Type == TEXT("gongfa") ? TEXT("功法运转") : TEXT("剑势凝聚"),
+			Accent, PlayerPos + FVector2D(-62.f, -78.f), 0.19f, 1.04f, 1.10f, 0.f);
+		QueueShake(1.8f, 0.12f, 0.18f);
+	}
+	else if (Animation == TEXT("talisman"))
+	{
+		SpawnStrikeEffect(PlayerPos, ECombatStrikeStyle::Talisman, Accent, Duration,
+			-4.f, 1.f, Card.UID);
+		QueueFloatingText(TEXT("符箓生效"), Accent, PlayerPos + FVector2D(-62.f, -80.f),
+			0.20f, 0.98f, 1.04f, 0.f);
+	}
+	else if (Animation == TEXT("seal"))
+	{
+		const bool bEnemySeal = AscendCardVisual::TargetsEnemy(Card) && Targets.Num() > 0;
+		const FVector2D SealPos = bEnemySeal ? GetEnemyScreenPos(Targets[0]) : PlayerPos;
+		SpawnStrikeEffect(SealPos, ECombatStrikeStyle::Seal, Accent, Duration,
+			0.f, 1.f, Card.UID);
+		QueueFloatingText(bEnemySeal ? TEXT("印记" ) : TEXT("状态强化"), Accent,
+			SealPos + FVector2D(-42.f, -72.f), 0.18f, 0.94f, 1.02f, 0.f);
+	}
+	else if (Animation == TEXT("curse_burst"))
+	{
+		SpawnStrikeEffect(PlayerPos, ECombatStrikeStyle::CurseBurst, Accent, Duration,
+			0.f, 1.08f, Card.UID);
+		QueueFloatingText(TEXT("反噬"), FLinearColor(1.f, 0.28f, 0.42f),
+			PlayerPos + FVector2D(-34.f, -68.f), 0.16f, 0.96f, 1.18f, -5.f);
+		QueueShake(FMath::Max(4.6f, Visual.Intensity), 0.20f, 0.17f);
+		AnimateColorFlash(Accent, 0.12f);
+	}
+	else if (Animation == TEXT("block"))
 	{
 		AnimateColorFlash(Accent, Duration * 0.8f);
 		SpawnFloatingText(TEXT("罡气"), Accent, PlayerPos.X - 36.f, PlayerPos.Y - 30.f, Duration);
 	}
-	else if (Visual.Animation == TEXT("heal"))
+	else if (Animation == TEXT("heal"))
 	{
 		SpawnHealBurst(PlayerPos, Accent, Duration);
 		SpawnFloatingText(TEXT("回春"), Accent, PlayerPos.X - 36.f, PlayerPos.Y - 30.f, Duration + 0.25f);
 	}
-	else if (Visual.Animation == TEXT("draw"))
+	else if (Animation == TEXT("draw"))
 	{
-		SpawnFloatingText(TEXT("抽牌"), Accent, GetViewportSize().X - 125.f, GetViewportSize().Y - 175.f, Duration);
+		SpawnFloatingText(TEXT("抽牌"), Accent, CanvasSize.X - 185.f, CanvasSize.Y - 255.f, Duration);
 	}
 
-	if (Visual.Intensity > 0.f)
-		AnimateScreenShake(Visual.Intensity, FMath::Min(0.35f, Duration));
 }
 
 void AAscendPlayerController::AnimateScreenShake(float Intensity, float Duration)
 {
 	if (!InfiniteNarrativeSettings.bEnableScreenShake) return;
-	if (!ScreenHost || !GetWorld()) return;
-
-	const FWidgetTransform OrigTransform = ScreenHost->GetRenderTransform();
-	const float StartTime = GetWorld()->GetTimeSeconds();
-	TWeakObjectPtr<UBorder> WeakHost = ScreenHost;
-	FTimerHandle Handle;
-	GetWorld()->GetTimerManager().SetTimer(Handle,
-		FTimerDelegate::CreateWeakLambda(this, [this, WeakHost, Handle, OrigTransform, StartTime, Intensity, Duration]() mutable
-		{
-			if (!WeakHost.IsValid())
-			{
-				if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(Handle);
-				return;
-			}
-			const float Elapsed = GetWorld()->GetTimeSeconds() - StartTime;
-			if (Elapsed >= Duration)
-			{
-				WeakHost->SetRenderTransform(OrigTransform);
-				if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(Handle);
-				return;
-			}
-			const float Amp = Intensity * (1.f - Elapsed / Duration);
-			WeakHost->SetRenderTranslation(FVector2D(
-				FMath::FRandRange(-Amp, Amp), FMath::FRandRange(-Amp, Amp)));
-		}), 0.033f, true);
-	AnimTimerHandles.Add(Handle);
+	if (!ScreenHost) return;
+	const float AddedTrauma = FMath::Clamp(Intensity / 12.f, 0.06f, 0.82f);
+	ScreenShakeTrauma = FMath::Clamp(ScreenShakeTrauma + AddedTrauma, 0.f, 1.f);
+	ScreenShakeDecayRate = FMath::Max(0.9f, ScreenShakeTrauma / FMath::Max(0.08f, Duration));
 }
 
 void AAscendPlayerController::AnimateColorFlash(FLinearColor Color, float Duration)
@@ -2740,20 +4037,23 @@ void AAscendPlayerController::AnimateColorFlash(FLinearColor Color, float Durati
 	if (!AnimCanvas || !GetWorld()) return;
 
 	UBorder* Flash = NewObject<UBorder>(AnimCanvas);
-	Flash->SetBrushColor(FLinearColor(Color.R, Color.G, Color.B, 0.45f));
+	const float PeakOpacity = InfiniteNarrativeSettings.bReduceFlashing ? 0.10f : 0.28f;
+	const float SafeDuration = InfiniteNarrativeSettings.bReduceFlashing
+		? FMath::Min(Duration, 0.14f) : FMath::Min(Duration, 0.28f);
+	Flash->SetBrushColor(FLinearColor(Color.R, Color.G, Color.B, PeakOpacity));
 
 	FVector2D CanvasSize = AnimCanvas->GetTickSpaceGeometry().GetLocalSize();
 	UCanvasPanelSlot* Slot = AnimCanvas->AddChildToCanvas(Flash);
 	Slot->SetPosition(FVector2D::ZeroVector);
 	Slot->SetSize(CanvasSize);
-	Flash->SetRenderOpacity(0.45f);
+	Flash->SetRenderOpacity(PeakOpacity);
 	ActiveAnimations.Add(Flash);
 
 	const float StartTime = GetWorld()->GetTimeSeconds();
 	TWeakObjectPtr<UBorder> WeakFlash = Flash;
 	FTimerHandle Handle;
 	GetWorld()->GetTimerManager().SetTimer(Handle,
-		FTimerDelegate::CreateWeakLambda(this, [this, WeakFlash, Handle, StartTime, Duration]() mutable
+		FTimerDelegate::CreateWeakLambda(this, [this, WeakFlash, Handle, StartTime, SafeDuration, PeakOpacity]() mutable
 		{
 			if (!WeakFlash.IsValid())
 			{
@@ -2761,14 +4061,14 @@ void AAscendPlayerController::AnimateColorFlash(FLinearColor Color, float Durati
 				return;
 			}
 			const float Elapsed = GetWorld()->GetTimeSeconds() - StartTime;
-			if (Elapsed >= Duration)
+			if (Elapsed >= SafeDuration)
 			{
 				WeakFlash->RemoveFromParent();
 				ActiveAnimations.Remove(WeakFlash.Get());
 				if (UWorld* W = GetWorld()) W->GetTimerManager().ClearTimer(Handle);
 				return;
 			}
-			WeakFlash->SetRenderOpacity(0.45f * (1.f - Elapsed / Duration));
+			WeakFlash->SetRenderOpacity(PeakOpacity * (1.f - Elapsed / SafeDuration));
 		}), 0.033f, true);
 	AnimTimerHandles.Add(Handle);
 }
@@ -2786,38 +4086,15 @@ void AAscendPlayerController::TriggerCombatAnimations(const FString& ActionType)
 	bool bPlayerBlocked = false;
 	bool bPlayerHealed = false;
 	bool bReshuffled = false;
-	TArray<TPair<int32, int32>> EnemyDamages;
+	bool bEnemyKilled = false;
+	const TArray<TPair<int32, int32>> EnemyDamages = CollectPendingEnemyDamageEvents();
 
 	int32 StartIdx = LastProcessedLogIndex;
 	LastProcessedLogIndex = LogN;
+	LastProcessedEnemyDamageEventIndex = Combat->EnemyDamageEvents.Num();
 	for (int32 i = StartIdx; i < LogN; ++i)
 	{
 		const FString& L = CombatLogLines[i];
-
-		// 敌人受击: "  血袍老祖 受到 8 点伤害 (罡气抵挡 2, HP 42/80)"
-		if (L.Contains(TEXT("受到")) && L.Contains(TEXT("点伤害")) && !L.Contains(TEXT("你受到")))
-		{
-			for (int32 ei = 0; ei < Combat->Enemies.Num(); ++ei)
-			{
-				if (L.Contains(Combat->Enemies[ei].State.Name))
-				{
-					// 从 "受到" 后面取数字
-					int32 Pos = L.Find(TEXT("受到 "));
-					if (Pos != INDEX_NONE)
-					{
-						Pos += 3;
-						while (Pos < L.Len() && L[Pos] == TEXT(' ')) ++Pos;
-						int32 End = Pos;
-						while (End < L.Len() && FChar::IsDigit(L[End])) ++End;
-						if (End > Pos)
-						{
-							EnemyDamages.Emplace(ei, FCString::Atoi(*L.Mid(Pos, End - Pos)));
-						}
-					}
-					break;
-				}
-			}
-		}
 
 		// 玩家受击: "  你受到 12 点伤害 (罡气抵挡 3, HP 65/80)"
 		if (L.Contains(TEXT("你受到")) && L.Contains(TEXT("点伤害")) && !L.Contains(TEXT("层")))
@@ -2876,10 +4153,26 @@ void AAscendPlayerController::TriggerCombatAnimations(const FString& ActionType)
 		{
 			bReshuffled = true;
 		}
+
+		if (L.Contains(TEXT("被击杀")))
+		{
+			bEnemyKilled = true;
+		}
 	}
 
 	// ---- 生成动画 ----
 	const bool bHasCardVisual = ActionType == TEXT("card") && !LastPlayedVisualAnimation.IsEmpty();
+	if (ActionType == TEXT("draw")) PlayAudioEvent(TEXT("draw"), 0.68f);
+	if (ActionType == TEXT("enemy_turn")) PlayAudioEvent(TEXT("enemy_turn"), 0.52f);
+	if (bReshuffled) PlayAudioEvent(TEXT("reshuffle"), 0.78f);
+	if (bEnemyKilled) PlayAudioEvent(TEXT("enemy_death"), 0.92f);
+	if (!bHasCardVisual)
+	{
+		if (bPlayerHealed) PlayAudioEvent(TEXT("heal_chime"), 0.72f);
+		if (bPlayerBlocked) PlayAudioEvent(TEXT("ward_raise"), 0.72f);
+		if (bPlayerDamaged) PlayAudioEvent(PlayerBlockValue > 0 ? TEXT("block") : TEXT("player_hit"), 0.82f);
+		if (EnemyDamages.Num() > 0) PlayAudioEvent(TEXT("impact_hit"), 0.62f);
+	}
 
 	const FGeometry& AG = AnimCanvas->GetCachedGeometry();
 	FVector2D PlayerDmgPos = AG.AbsoluteToLocal(AG.GetAbsolutePosition() + FVector2D(560.f, 280.f));
@@ -2890,15 +4183,27 @@ void AAscendPlayerController::TriggerCombatAnimations(const FString& ActionType)
 		SpawnFloatingText(TEXT("+回春"), FLinearColor(0.2f, 0.8f, 0.3f), PlayerStatusPos.X, PlayerStatusPos.Y);
 	}
 
-	AnimateScreenShake(3.f, 0.2f);
+	int32 LargestEnemyHit = 0;
+	float LargestEnemyHitRatio = 0.f;
 	for (const auto& Pair : EnemyDamages)
 	{
-		const int32 EnemyCount = Combat->Enemies.Num();
-		FVector2D EP = GetEnemyScreenPos(Pair.Key);
-		SpawnFloatingText(FString::Printf(TEXT("-%d"), Pair.Value),
-			FLinearColor(0.95f, 0.25f, 0.15f), EP.X - 20.f, EP.Y - 20.f);
+		LargestEnemyHit = FMath::Max(LargestEnemyHit, Pair.Value);
+		if (Combat->Enemies.IsValidIndex(Pair.Key) && Combat->Enemies[Pair.Key].State.MaxHP > 0)
+			LargestEnemyHitRatio = FMath::Max(LargestEnemyHitRatio,
+				static_cast<float>(Pair.Value) / Combat->Enemies[Pair.Key].State.MaxHP);
 		if (!bHasCardVisual)
-			SpawnSlashEffect(EP.X, EP.Y);
+		{
+			const FVector2D EP = GetEnemyScreenPos(Pair.Key);
+			SpawnFloatingText(FString::Printf(TEXT("-%d"), Pair.Value),
+				FLinearColor(0.95f, 0.25f, 0.15f), EP.X - 20.f, EP.Y - 20.f);
+			SpawnStrikeEffect(EP, ECombatStrikeStyle::ArcSlash,
+				FLinearColor(0.88f, 0.96f, 1.f, 0.92f), 0.34f, -8.f, 0.88f, Pair.Key);
+		}
+	}
+	if (LargestEnemyHit > 0 && !bHasCardVisual)
+	{
+		AnimateScreenShake(LargestEnemyHitRatio >= 0.20f ? 7.f : (LargestEnemyHitRatio >= 0.10f ? 4.5f : 2.8f),
+			LargestEnemyHitRatio >= 0.20f ? 0.22f : 0.15f);
 	}
 
 	if (bPlayerDamaged)
@@ -2908,23 +4213,23 @@ void AAscendPlayerController::TriggerCombatAnimations(const FString& ActionType)
 			int32 ActualHP = FMath::Max(0, PlayerDamageValue - PlayerBlockValue);
 			if (PlayerBlockValue > 0)
 			{
-				AnimateScreenShake(8.f, 0.35f);
-				AnimateColorFlash(FLinearColor(0.8f, 0.1f, 0.05f), 0.4f);
+				AnimateScreenShake(ActualHP > Combat->Player.MaxHP / 5 ? 9.f : 6.f, 0.24f);
+				AnimateColorFlash(FLinearColor(0.8f, 0.1f, 0.05f), 0.24f);
 				SpawnFloatingText(FString::Printf(TEXT("-%d (抵消%d)"), ActualHP, PlayerBlockValue),
 					FLinearColor(0.85f, 0.2f, 0.1f), PlayerDmgPos.X, PlayerDmgPos.Y);
 			}
 			else
 			{
-				AnimateScreenShake(8.f, 0.35f);
-				AnimateColorFlash(FLinearColor(0.8f, 0.1f, 0.05f), 0.4f);
+				AnimateScreenShake(PlayerDamageValue > Combat->Player.MaxHP / 5 ? 9.f : 6.f, 0.24f);
+				AnimateColorFlash(FLinearColor(0.8f, 0.1f, 0.05f), 0.24f);
 				SpawnFloatingText(FString::Printf(TEXT("-%d"), PlayerDamageValue),
 					FLinearColor(0.85f, 0.2f, 0.1f), PlayerDmgPos.X, PlayerDmgPos.Y);
 			}
 		}
 		else
 		{
-			AnimateScreenShake(8.f, 0.35f);
-			AnimateColorFlash(FLinearColor(0.8f, 0.1f, 0.05f), 0.4f);
+			AnimateScreenShake(6.f, 0.20f);
+			AnimateColorFlash(FLinearColor(0.8f, 0.1f, 0.05f), 0.20f);
 			SpawnFloatingText(TEXT("受击"), FLinearColor(0.85f, 0.2f, 0.1f), PlayerDmgPos.X, PlayerDmgPos.Y);
 		}
 	}
@@ -3049,7 +4354,10 @@ void AAscendPlayerController::PlayHandEntranceAnimation(int32 Count)
 		TWeakObjectPtr<UButton> Btn = HandCardButtons[i];
 
 		Btn->SetRenderTranslation(PileAnchor);
-		Btn->SetRenderScale(FVector2D(0.2f, 0.2f));
+		// Keep the card at its authored hand size throughout the entrance.  A
+		// scale-up from 0.2 would magnify the already-laid-out card and make the
+		// frame/text visibly soft during every draw.
+		Btn->SetRenderScale(FVector2D(1.f, 1.f));
 		Btn->SetRenderOpacity(0.f);
 
 		const float Delay = i * 0.08f;
@@ -3076,16 +4384,8 @@ void AAscendPlayerController::PlayHandEntranceAnimation(int32 Count)
 				if (Elapsed < 0.f) return;
 				if (Elapsed >= Dur)
 				{
-					if (PC->HoveredCardIndex == i)
-					{
-						Btn->SetRenderTranslation(FVector2D::ZeroVector);
-						Btn->SetRenderScale(FVector2D(1.f, 1.f));
-					}
-					else
-					{
-						Btn->SetRenderTranslation(FVector2D::ZeroVector);
-						Btn->SetRenderScale(FVector2D(1.f, 1.f));
-					}
+					Btn->SetRenderTranslation(FVector2D::ZeroVector);
+					Btn->SetRenderScale(FVector2D(1.f, 1.f));
 					Btn->SetRenderOpacity(1.f);
 					FTimerHandle CompletedHandle = *H;
 					W->GetTimerManager().ClearTimer(CompletedHandle);
@@ -3097,9 +4397,6 @@ void AAscendPlayerController::PlayHandEntranceAnimation(int32 Count)
 
 				FVector2D Tr = PileAnchor * (1.f - Ease);
 				Tr.Y -= FMath::Sin(T * PI) * 40.f;
-				const float Scale = (T < 0.5f)
-					? FMath::Lerp(0.2f, 1.15f, T * 2.f)
-					: FMath::Lerp(1.15f, 1.0f, (T - 0.5f) * 2.f);
 				if (PC->HoveredCardIndex == i)
 				{
 					Btn->SetRenderTranslation(FVector2D::ZeroVector);
@@ -3109,7 +4406,7 @@ void AAscendPlayerController::PlayHandEntranceAnimation(int32 Count)
 				else
 				{
 					Btn->SetRenderTranslation(Tr);
-					Btn->SetRenderScale(FVector2D(Scale, Scale));
+					Btn->SetRenderScale(FVector2D(1.f, 1.f));
 					Btn->SetRenderOpacity(FMath::Clamp(T / 0.15f, 0.f, 1.f));
 				}
 			}), 0.033f, true);
@@ -3164,6 +4461,12 @@ void AAscendPlayerController::ShowGainToasts()
 
 	const TArray<FString> Notes = Run->ConsumeGainNotifications();
 	if (Notes.Num() == 0) return;
+	PlayAudioEvent(TEXT("reward"), 0.72f);
+	for (const FString& Note : Notes)
+	{
+		if (Note.Contains(TEXT("灵石"))) PlayAudioEvent(TEXT("gold"), 0.48f);
+		if (Note.Contains(TEXT("突破"))) PlayAudioEvent(TEXT("breakthrough"), 0.70f);
+	}
 
 	// 顶部居中浮条：金边墨底，逐条列出
 	UBorder* Frame = NewObject<UBorder>(AnimCanvas);

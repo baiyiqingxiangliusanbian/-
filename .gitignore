@@ -28,10 +28,23 @@ Saved/
 # Local backup snapshots created by asset replacement scripts
 Build/ArtBackup_*/
 Build/HUDBackup_*/
+Content/Audio/backup_*/
+
+# Processed runtime audio is bundled in releases; keep public source docs only.
+Content/Audio/*
+!Content/Audio/README.md
+!Content/Audio/THIRD_PARTY_AUDIO.md
+
+# Internal handoff and agent planning notes
+BOT_PLAN.md
+PROJECT_STATE_HANDOFF.md
 
 # Python caches
 __pycache__/
 *.py[cod]
+Tools/AudioWorkbench/.venv*/
+Tools/AudioWorkbench/model_cache/
+Tools/AudioWorkbench/staging/
 
 # OS and editor noise
 .DS_Store

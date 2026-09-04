@@ -101,11 +101,11 @@ struct FCardVisualData
 {
 	GENERATED_BODY()
 
-	/** none / slash / fireball / impact / block / heal / draw */
+	/** none / slash / greatsword / myriad_swords / sword_wave / thunder / flame_burst / poison / ward / spirit_flow / power_aura / talisman / seal / curse_burst / fireball / impact / heal */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FString Animation = TEXT("none");
 
-	/** none / sword_slash / fireball / block / heal / draw */
+	/** none / sword_slash / sword_heavy / sword_flurry / sword_wave / thunder_crack / fire_burst / poison_hiss / ward_raise / spirit_chime / power_surge / talisman_cast / seal_stamp / curse_whisper / impact_hit / heal_chime */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite)
 	FString Sound = TEXT("none");
 

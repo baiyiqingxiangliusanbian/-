@@ -278,7 +278,7 @@ namespace
 			if ((Token.StartsWith(TEXT("x")) || Token.StartsWith(TEXT("*"))) && Token.Mid(1).IsNumeric())
 				Times = Token.Mid(1);
 		}
-		if (!Times.IsEmpty()) Effect->SetNumberField(TEXT("times"), FMath::Max(1, FCString::Atoi(*Times)));
+		Effect->SetNumberField(TEXT("times"), Times.IsEmpty() ? 1 : FMath::Max(1, FCString::Atoi(*Times)));
 
 		FString Chance = ValueAfter(Tokens, {TEXT("chance"), TEXT("概率")});
 		if (!Chance.IsEmpty())
@@ -288,6 +288,7 @@ namespace
 			if (bPercent || Number > 1.f) Number /= 100.f;
 			Effect->SetNumberField(TEXT("chance"), FMath::Clamp(Number, 0.f, 1.f));
 		}
+		else Effect->SetNumberField(TEXT("chance"), 1.f);
 		const FString Limit = ValueAfter(Tokens, {TEXT("limit"), TEXT("max"), TEXT("上限")});
 		if (!Limit.IsEmpty()) Effect->SetNumberField(TEXT("max_triggers"), FMath::Max(0, FCString::Atoi(*Limit)));
 		const FString Condition = ValueAfter(Tokens, {TEXT("if"), TEXT("when"), TEXT("若")});
@@ -337,8 +338,22 @@ namespace
 		if (StatusActions.Contains(Action))
 		{
 			FString Status = ImplicitStatus;
+			if (Status.IsEmpty())
+			{
+				for (const FString& Raw : Tokens)
+				{
+					FString CandidateStatus;
+					CanonicalAction(Raw, CandidateStatus);
+					if (!CandidateStatus.IsEmpty()) { Status = CandidateStatus; break; }
+				}
+			}
 			if (Status.IsEmpty()) Status = CanonicalStatus(ValueAfter(Tokens, {TEXT("status"), TEXT("状态")}));
-			OutEffect->SetStringField(TEXT("status"), Status.IsEmpty() ? TEXT("poison") : Status);
+			if (Status.IsEmpty())
+			{
+				OutError = TEXT("状态动作缺少明确 status；请写 poison、burn、weak、vulnerable、strength 等受支持状态，不能由编译器猜测");
+				return false;
+			}
+			OutEffect->SetStringField(TEXT("status"), Status);
 			OutEffect->SetNumberField(TEXT("stacks"), FMath::Max(1, FirstInteger(Tokens, 1)));
 			// Runtime status strength lives in stacks. Keep the generic value neutral so a
 			// perfectly valid "poison 2" is not rejected as an overpowered value=2 action.
@@ -451,6 +466,9 @@ bool FCardScriptCompiler::CompileToAuthoredObject(const FString& Source,
 	OutCard->SetBoolField(TEXT("exhaust"), false);
 	OutCard->SetBoolField(TEXT("retain"), false);
 	TArray<TSharedPtr<FJsonValue>> Effects;
+	TArray<TSharedPtr<FJsonValue>> UpgradeEffects;
+	TOptional<int32> UpgradeCost;
+	FString UpgradeCounter;
 
 	for (FString Line : Lines)
 	{
@@ -484,6 +502,8 @@ bool FCardScriptCompiler::CompileToAuthoredObject(const FString& Source,
 		if (!bHasKeyValue && (LooseKey == TEXT("flavor") || LooseKey == TEXT("风味"))) { OutCard->SetStringField(TEXT("flavor"), LooseValue); continue; }
 		if (bHasKeyValue && (Key == TEXT("counter") || Key == TEXT("计数器"))) { OutCard->SetStringField(TEXT("counter_condition"), CanonicalCounter(Value)); continue; }
 		if (!bHasKeyValue && (LooseKey == TEXT("counter") || LooseKey == TEXT("计数器"))) { OutCard->SetStringField(TEXT("counter_condition"), CanonicalCounter(LooseValue)); continue; }
+		if (bHasKeyValue && (Key == TEXT("upgrade_cost") || Key == TEXT("升级费用"))) { UpgradeCost = FCString::Atoi(*Value); continue; }
+		if (bHasKeyValue && (Key == TEXT("upgrade_counter") || Key == TEXT("升级计数器"))) { UpgradeCounter = CanonicalCounter(Value); continue; }
 		if (bHasKeyValue && (Key == TEXT("exhaust") || Key == TEXT("消耗"))) { OutCard->SetBoolField(TEXT("exhaust"), !Value.Equals(TEXT("false"), ESearchCase::IgnoreCase) && Value != TEXT("0") && Value != TEXT("否")); continue; }
 		if (bHasKeyValue && (Key == TEXT("retain") || Key == TEXT("保留"))) { OutCard->SetBoolField(TEXT("retain"), !Value.Equals(TEXT("false"), ESearchCase::IgnoreCase) && Value != TEXT("0") && Value != TEXT("否")); continue; }
 		if (Lower == TEXT("exhaust") || Lower == TEXT("消耗")) { OutCard->SetBoolField(TEXT("exhaust"), true); continue; }
@@ -491,12 +511,19 @@ bool FCardScriptCompiler::CompileToAuthoredObject(const FString& Source,
 
 		FString Trigger = TEXT("on_play");
 		FString EffectBody = Line;
+		bool bUpgradeEffect = false;
 		if (bHasKeyValue)
 		{
-			const FString Candidate = CanonicalTrigger(Key.StartsWith(TEXT("on ")) ? Key.Mid(3) : Key);
-			if (Key == TEXT("play") || Key == TEXT("打出") || Key == TEXT("effect") || Key == TEXT("效果")
-				|| Key.StartsWith(TEXT("on_"))
-				|| Key.StartsWith(TEXT("on ")) || Key.StartsWith(TEXT("before_")) || Key.StartsWith(TEXT("after_"))
+			FString TriggerKey = Key;
+			if (TriggerKey.StartsWith(TEXT("upgrade_")))
+			{
+				bUpgradeEffect = true;
+				TriggerKey.RightChopInline(8);
+			}
+			const FString Candidate = CanonicalTrigger(TriggerKey.StartsWith(TEXT("on ")) ? TriggerKey.Mid(3) : TriggerKey);
+			if (TriggerKey == TEXT("play") || TriggerKey == TEXT("打出") || TriggerKey == TEXT("effect") || TriggerKey == TEXT("效果")
+				|| TriggerKey.StartsWith(TEXT("on_"))
+				|| TriggerKey.StartsWith(TEXT("on ")) || TriggerKey.StartsWith(TEXT("before_")) || TriggerKey.StartsWith(TEXT("after_"))
 				|| Candidate != TEXT("on_play"))
 			{
 				Trigger = Candidate;
@@ -507,7 +534,7 @@ bool FCardScriptCompiler::CompileToAuthoredObject(const FString& Source,
 		FString EffectError;
 		if (ParseEffect(EffectBody, Trigger, Effect, EffectError))
 		{
-			Effects.Add(MakeShared<FJsonValueObject>(Effect));
+			(bUpgradeEffect ? UpgradeEffects : Effects).Add(MakeShared<FJsonValueObject>(Effect));
 			continue;
 		}
 		FString ExistingName;
@@ -535,32 +562,57 @@ bool FCardScriptCompiler::CompileToAuthoredObject(const FString& Source,
 		return false;
 	}
 	OutCard->SetArrayField(TEXT("effects"), Effects);
+	if (UpgradeCost.IsSet() || !UpgradeCounter.IsEmpty() || UpgradeEffects.Num() > 0)
+	{
+		TSharedPtr<FJsonObject> Upgrade = MakeShared<FJsonObject>();
+		if (UpgradeCost.IsSet()) Upgrade->SetNumberField(TEXT("cost"), UpgradeCost.GetValue());
+		if (!UpgradeCounter.IsEmpty()) Upgrade->SetStringField(TEXT("counter_condition"), UpgradeCounter);
+		if (UpgradeEffects.Num() > 0) Upgrade->SetArrayField(TEXT("effects"), UpgradeEffects);
+		OutCard->SetObjectField(TEXT("upgrade"), Upgrade);
+	}
 	return true;
 }
 
 FString FCardScriptCompiler::PromptReference()
 {
 	return TEXT(
-		"只输出宽松卡牌短脚本，不输出JSON、Markdown、分析或解释。字段顺序自由，冒号或等号都行；"
-		"可省略默认值（uncommon / skill / cost 1）。最小只需卡名和一行效果：\n"
-		"name: 卡名\nplay: damage 8\n"
-		"可选字段：rarity common|uncommon|rare|legendary；type basic|spell|sword|body|talisman|skill|gongfa；"
-		"cost 0..3；class；exhaust；retain；counter；flavor。\n"
-		"每个效果必须独占一行，格式固定为 trigger: action value [target] [x次数] [if 条件] [scale 来源 factor N divisor N] [chance 50%] [limit N]。"
-		"也接受自然英文，如 play: deal 8 damage、play: gain 6 block、play: apply 2 poison。\n"
-		"trigger可写 play/turn_start/turn_end/card_played/damage_dealt/damage_taken/draw/discard/exhaust/kill。\n"
-		"action可写 damage/aoe/random_damage/block/heal/draw/discover/energy/next_energy/self_damage/discard/"
-		"poison/burn/weak/vulnerable/strength/dexterity/move/copy/cost/upgrade/shuffle/transfer。\n"
-		"任意资源转化：play: block -> strength consume；或 play: convert block into strength consume。\n"
-		"牌区操作：play: move 1 highest_cost discard draw_top\n"
-		"if条件只允许self_hp_below:50、self_hp_above:50、self_has_status:strength、self_missing_status:poison、"
-		"target_has_status:poison、target_missing_status:weak、counter_at_least:3、hand_size_at_least:5、"
-		"draw_pile_at_most:3、discard_pile_at_least:5；不要把月相、天气或剧情概念发明成条件名，改用retain、trigger和多条效果近似。\n"
-		"绝不能写trigger: play、effect: 一段说明、choose/reveal路径或其他自创语法；若复杂概念无法完美实现，就用上述原语做最接近的可玩近似。\n"
-		"模仿结构而非题材：\n"
-		"name: 袖底青芒\nrarity: uncommon\ncost: 1\nexhaust\nplay: damage 7\nplay: poison 2\n\n"
-		"name: 月痕藏宝图\ntype: skill\ncost: 1\nretain\nplay: discover 3\nplay: block 5\n\n"
-		"name: 罡尽锋生\ntype: gongfa\nrarity: rare\ncost: 2\nexhaust\nplay: block -> strength consume\n"
-		"不要为了像示例而使用抽牌；先从concept提炼材质、用途、变化规律、取得代价至少两个特征，再各自映射成效果行。"
-		"提交前逐行检查：除字段行外，每行冒号左边只能是trigger，右边第一个可识别动作必须来自action清单。" );
+		"script 是宽松的逐行卡牌程序。字段顺序自由，冒号或等号都可以；每个效果独占一行。\n"
+		"基础字段：name；rarity=common|uncommon|rare|legendary；type=basic|spell|sword|body|talisman|skill|gongfa；"
+		"cost=0..3；可选 class、exhaust、retain、counter、flavor。未写时默认 uncommon、skill、1费。\n"
+		"升级版用 upgrade_cost、upgrade_counter 与 upgrade_play/upgrade_turn_start 等行；写了 upgrade 效果时要完整列出升级后的必要效果。"
+		"升级必须实际改变费用、计数方式或核心效果。例：upgrade_cost: 0；upgrade_play: damage 10。\n"
+		"效果格式：trigger: action value [target] [x次数] [if 条件] [scale 来源 factor N divisor N] [chance 50%] [limit N]\n"
+		"trigger：play、turn_start、turn_end、card_played、damage_dealt、damage_taken、draw、discard、exhaust、"
+		"reshuffle、kill、spend_spirit、deal_damage、take_damage、gain_block、gained_block、status_applied。"
+		"非 play 触发会把该效果注册为本场战斗规则；用 limit N 限制触发次数。\n"
+		"直接动作：damage、damage_all/aoe、damage_random/random_damage、block、heal、draw、discover_draw/discover、"
+		"gain_spirit/energy、lose_spirit、spirit_next_turn、self_damage、discard_random、discard_hand、gain_gold、"
+		"gain_max_hp、cleanse_toxicity。\n"
+		"状态动作：poison、burn、weak、vulnerable、strength、dexterity、nightmare、temp_strength；也可写"
+		"apply_status、remove_status、set_status、amplify_status、damage_per_status、damage_all_per_status、block_per_status。\n"
+		"动态动作：damage_per_block、damage_all_per_repeat、damage_all_per_basic_gongfa、cost_free_basic_gongfa、"
+		"defense_to_strength。也可给普通数值动作添加 scale 来源 factor N divisor N。\n"
+		"scale 来源：self_block、missing_hp、hand_size、draw_pile、discard_pile、exhaust_pile、cards_played_this_turn、"
+		"basic_gongfa_played、event_value、self_hp、self_spirit、turn、enemy_count、last_card_cost、target_hp、"
+		"target_missing_hp、target_block、self_status:状态、target_status:状态、var:英文变量。\n"
+		"牌区动作：move、copy、cost、upgrade、transform、shuffle。区域为 hand、draw、draw_top、draw_random、discard、"
+		"exhaust、last_played；选择器为 any、random、highest_cost、lowest_cost、upgraded、non_upgraded、retained、"
+		"exhausting、type:类型、rarity:品阶、cost_at_most:N。例：play: move 1 highest_cost discard draw_top。\n"
+		"资源与变量转化：play: block -> strength consume；card_played: var:ink -> self_spirit set if source_at_least:var:ink=3 limit 1。"
+		"可读写 self_block、self_hp、self_spirit、target_block、target_hp、self_status:状态、target_status:状态、var:英文变量；"
+		"模式可写 add、set、min、max、multiply，consume 会清空来源。需要同一来源先计算再消耗时按行序执行，例如"
+		"‘play: damage 1 enemy scale self_block factor 1’后接‘play: self_block -> target_status:vulnerable consume’，"
+		"会先按当前罡气造成伤害，再把全部罡气转化为目标易伤；不要另加无关代价。\n"
+		"if 条件可用 && 和 || 组合：self_hp_below:N、self_hp_above:N、self_has_status:状态、self_missing_status:状态、"
+		"target_has_status:状态、target_missing_status:状态、counter_at_least:N、hand_size_at_least:N、"
+		"draw_pile_at_most:N、discard_pile_at_least:N、event_tag_is:类型、source_at_least:来源=N、"
+		"source_at_most:来源=N、source_equals:来源=N。\n"
+		"使用 counter_at_least 或 scale counter 时，基础字段必须声明 counter: on_basic_play|on_basic_gongfa_play|"
+		"on_any_card_play|on_same_type_play|on_sword_play|on_spell_play|on_damage_dealt|on_draw|on_turn_start；"
+		"否则计数不会增长。卡牌自身计数只能写 scale counter，不能用 var:别名冒充；任何被读取的 var:变量都必须在"
+		"基础版与升级版各自的完整效果列表里通过同名 destination 得到写入。重复结算请用 x次数，不要复制两行完全相同的效果。\n"
+		"卡面会逐条显示可执行效果；不要把效果数量当成设计目标，应只保留表达核心玩法所需的效果，并让总说明简短清楚。"
+		"复杂度应来自事件、条件、scale和资源转换，而不是堆很多小效果。\n"
+		"不要写自然语言效果说明或自创 action；应通过上述事件、条件、变量、转化和牌区原语组合机制。"
+		"最小示例仅说明语法：name: 无名式\nplay: damage 8\n" );
 }

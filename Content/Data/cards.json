@@ -232,7 +232,7 @@
       "class": "sword",
       "rarity": "common",
       "cost": 1,
-      "description": "抽1张牌。强化【一剑】+6伤害",
+      "description": "抽1张牌。强化【一剑】+4伤害",
       "flavor": "蓄剑于鞘，待时而动。",
       "effects": [
         {
@@ -242,12 +242,12 @@
         },
         {
           "action": "enhance_one_sword",
-          "value": 6,
+          "value": 4,
           "target": "one_sword"
         }
       ],
       "upgrade": {
-        "description": "抽1张牌。强化【一剑】+12伤害",
+        "description": "抽1张牌。强化【一剑】+8伤害",
         "effects": [
           {
             "action": "draw",
@@ -256,7 +256,7 @@
           },
           {
             "action": "enhance_one_sword",
-            "value": 12,
+            "value": 8,
             "target": "one_sword"
           }
         ]
@@ -270,7 +270,7 @@
       "class": "sword",
       "rarity": "common",
       "cost": 0,
-      "description": "获得3点护体罡气。强化【一剑】+4伤害",
+      "description": "获得3点护体罡气。强化【一剑】+2伤害",
       "flavor": "凝神守中，势如垒卵。",
       "effects": [
         {
@@ -280,12 +280,12 @@
         },
         {
           "action": "enhance_one_sword",
-          "value": 4,
+          "value": 2,
           "target": "one_sword"
         }
       ],
       "upgrade": {
-        "description": "获得8点护体罡气。强化【一剑】+8伤害",
+        "description": "获得8点护体罡气。强化【一剑】+4伤害",
         "effects": [
           {
             "action": "block",
@@ -294,7 +294,7 @@
           },
           {
             "action": "enhance_one_sword",
-            "value": 8,
+            "value": 4,
             "target": "one_sword"
           }
         ]
@@ -308,7 +308,7 @@
       "class": "sword",
       "rarity": "common",
       "cost": 1,
-      "description": "获得5点护体罡气。强化【一剑】+5伤害",
+      "description": "获得5点护体罡气。强化【一剑】+3伤害",
       "flavor": "收剑归鞘，势蓄于身。",
       "effects": [
         {
@@ -318,12 +318,12 @@
         },
         {
           "action": "enhance_one_sword",
-          "value": 5,
+          "value": 3,
           "target": "one_sword"
         }
       ],
       "upgrade": {
-        "description": "获得10点护体罡气。强化【一剑】+10伤害",
+        "description": "获得10点护体罡气。强化【一剑】+6伤害",
         "effects": [
           {
             "action": "block",
@@ -332,7 +332,7 @@
           },
           {
             "action": "enhance_one_sword",
-            "value": 10,
+            "value": 6,
             "target": "one_sword"
           }
         ]
@@ -446,6 +446,14 @@
           }
         ]
       },
+      "visual": {
+        "animation": "myriad_swords",
+        "sound": "sword_flurry",
+        "accent": "#D8E9FF",
+        "duration": 0.88,
+        "intensity": 8,
+        "count": 7
+      },
       "art": "Art/cards/myriad_swords.png"
     },
     {
@@ -454,18 +462,26 @@
       "type": "zhaoshi",
       "class": "sword",
       "rarity": "common",
-      "cost": 3,
-      "description": "对所有敌人造成9点伤害（每层强化+6）。保留，消失",
+      "cost": 2,
+      "description": "对所有敌人造成8点伤害（每层强化+3）。保留，消失",
       "flavor": "一剑破万法。",
       "retain": true,
       "exhaust": true,
       "effects": [
         {
           "action": "one_sword_strike",
-          "value": 9,
+          "value": 8,
           "target": "all_enemies"
         }
       ],
+      "visual": {
+        "animation": "greatsword",
+        "sound": "sword_heavy",
+        "accent": "#FFF1B5",
+        "duration": 0.82,
+        "intensity": 12,
+        "count": 1
+      },
       "art": "Art/cards/heavenly_thunder.png"
     },
     {
@@ -475,7 +491,7 @@
       "class": "sword",
       "rarity": "uncommon",
       "cost": 1,
-      "description": "功法：每打出一张基础卡或招式卡，强化【一剑】+3伤害（每回合至多3次）。消耗",
+      "description": "功法：每打出一张基础卡或招式卡，强化【一剑】+2伤害（每回合至多3次）。消耗",
       "flavor": "剑意绵延，不绝如缕。",
       "exhaust": true,
       "effects": [
@@ -487,7 +503,7 @@
       ],
       "upgrade": {
         "cost": 0,
-        "description": "功法：每打出一张基础卡或招式卡，强化【一剑】+4伤害（每回合至多3次）。消耗",
+        "description": "功法：每打出一张基础卡或招式卡，强化【一剑】+3伤害（每回合至多3次）。消耗",
         "effects": [
           {
             "action": "power",
