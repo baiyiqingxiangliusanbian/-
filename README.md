@@ -15,6 +15,28 @@
 - **修仙成长与叙事重置**：炼气至筑基的成长线、有限预写开场、动态剧情续写，以及可选的 SillyTavern 世界书/角色卡导入。
 - **可观察的 AI 游戏工程**：请求上下文、状态补丁、战斗预演、生卡候选和接受复核均有明确边界，方便研究和复盘，而不是把结果藏在黑盒里。
 
+## 重要结论：LLM 可以成为游戏代码的一部分
+
+这个项目已经在 Unreal Engine 5 中实现了可运行的 Agent Loop：游戏运行时观察当前状态，调用 LLM 生成新的关卡、路线、叙事或卡牌，再经过结构化解析、本地规则编译、硬检查、战斗 smoke test 和结果复核；如果不符合游戏规范，就继续修正、重试，直到得到可接受的结果。这种闭环的工作方式，和 Codex 或其他 harness 工具的“执行—检查—自我纠错”范式相似，但它直接运行在游戏运行时中。
+
+目前实验得到的关键判断是：
+
+- 在范式清晰、工具库充足、生成路线明确的情况下，Agent Loop 不需要无休止地堆叠步骤，通常可以用较少的迭代完成一次内容生成与校验。
+- 同一套游戏侧 Agent Loop 可以进入 Android 包运行；载体是手机并不会改变“LLM 参与游戏代码路径”这一事实。
+- 因此，LLM 作为游戏代码的一部分是可行的：它可以参与内容生成和局面决策，同时把最终状态交给本地规则、编译器和测试边界守住。
+
+这不是对所有游戏、所有模型或所有网络条件的性能承诺，而是本项目在 UE5、受控工具链和可验证内容管线中的实验性结论。
+
+## 游戏截图
+
+以下截图来自当前开发版的 UE5 运行画面，展示动态叙事、角色对话和可交互选择 UI：
+
+![动态叙事与角色对话](https://github.com/baiyiqingxiangliusanbian/-/releases/download/v0.2.0-experimental/AscendSpire-screenshot-rp-dialogue.png)
+
+![卷轴式叙事面板](https://github.com/baiyiqingxiangliusanbian/-/releases/download/v0.2.0-experimental/AscendSpire-screenshot-scroll-dialogue.png)
+
+![叙事选择流程](https://github.com/baiyiqingxiangliusanbian/-/releases/download/v0.2.0-experimental/AscendSpire-screenshot-choice-flow.png)
+
 ## 下载最新实验版
 
 当前 Release 提供：
